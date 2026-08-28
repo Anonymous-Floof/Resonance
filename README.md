@@ -1,3 +1,7 @@
+> [!NOTE]
+> - This project was built with 99% AI assistance (Claude Opus 5+) under human oversight. 🤖
+> - Expect there to be bugs and balancing issues
+
 # Resonance
 
 A modern music player for the collection you already have.
