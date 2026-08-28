@@ -1,0 +1,49 @@
+# Build output. This is the 30 GB: Cargo rebuilds every byte of it from source.
+/target/
+
+# Cargo.lock is deliberately NOT ignored. This workspace ships a binary, and a
+# committed lock file is what makes a build reproducible for everyone else.
+
+# ---------------------------------------------------------------------------
+# Development-only probes
+# ---------------------------------------------------------------------------
+#
+# These three were written to *tune* the app, not to test it. Each needs a real,
+# curated music collection to say anything useful, each prints that collection
+# to stdout, and each answered its question once — the answers are now constants
+# in the source. They stay out of the repository because a probe you cannot run
+# without someone else's music library is not much use to a contributor, and
+# because pasting their output into a bug report leaks what you listen to.
+#
+# The six examples that remain all either assert something or help diagnose a
+# real problem; see the README.
+/crates/mp-core/examples/accent_probe.rs
+/crates/mp-core/examples/discover_probe.rs
+/crates/mp-audio/examples/sound_probe.rs
+
+# ---------------------------------------------------------------------------
+# Local state
+# ---------------------------------------------------------------------------
+#
+# A library or settings file must never travel with the source. The app keeps
+# its own under %APPDATA%/Resonance, but these appear in the repository root if
+# you run a portable build or a probe from here.
+/Resonance-data/
+resonance.portable
+*.db
+*.db-wal
+*.db-shm
+config.v*.bak.toml
+
+# Probe output.
+*.png
+*.html
+!/docs/**
+
+# Editors and OS clutter.
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store

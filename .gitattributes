@@ -1,0 +1,17 @@
+# Normalise line endings in the repository, whatever the contributor's OS does
+# in their working copy. Without this, a checkout on Linux and a checkout on
+# Windows disagree about every line of every file, and the first cross-platform
+# commit looks like a rewrite of the whole codebase.
+* text=auto eol=lf
+
+# Windows-only shell scripts, if any are ever added, need their native endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary, so never touched.
+*.png binary
+*.jpg binary
+*.ico binary
+*.ttf binary
+*.otf binary
+*.mpbundle binary

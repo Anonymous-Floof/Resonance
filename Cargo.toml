@@ -1,0 +1,130 @@
+[workspace]
+members = ["crates/mp-core", "crates/mp-audio", "crates/mp-ui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# 1.88 rather than the 1.85 that edition 2024 alone needs: the codebase uses
+# let-chains (`if let Some(x) = ... && ...`), which stabilised in 1.88.
+rust-version = "1.88"
+license = "MIT"
+
+[workspace.dependencies]
+# --- internal ---
+mp-core = { path = "crates/mp-core" }
+mp-audio = { path = "crates/mp-audio" }
+mp-ui = { path = "crates/mp-ui" }
+
+# --- ui ---
+eframe = { version = "0.36", default-features = false, features = [
+    "default_fonts",
+    "wgpu",
+    "wayland",
+    "x11",
+] }
+egui = "0.36"
+egui_extras = { version = "0.36", features = ["image"] }
+
+# --- audio ---
+symphonia = { version = "0.6", features = ["all"] }
+cpal = "0.18"
+rubato = "5"
+realfft = "3.5"
+rtrb = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+# Dev-only: validates the visualiser shader without needing a GPU.
+naga = { version = "30", features = ["wgsl-in"] }
+
+# --- library ---
+rusqlite = { version = "0.40", features = ["bundled"] }
+lofty = "0.25"
+walkdir = "2.5"
+rayon = "1.12"
+notify = "9.0.0-rc.4"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "gif"] }
+kmeans_colors = "0.7"
+palette = "0.7"
+nucleo = "0.5"
+# Settings bundles (`.mpbundle`) are ordinary zips, so they can be opened and
+# inspected with anything. Pinned to 7.x: 8 needs a newer rustc than this
+# workspace targets.
+zip = { version = "7", default-features = false, features = ["deflate-flate2"] }
+
+# --- windows integration ---
+# Media session (the Win11 media flyout and hardware media keys). Windows-only,
+# so it is a target-specific dependency of mp-ui rather than a workspace-wide one.
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Media",
+    "Storage",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_System_WinRT",
+] }
+
+# --- infra ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+directories = "6"
+crossbeam = "0.8"
+parking_lot = "0.12"
+arc-swap = "1.9"
+rfd = "0.17"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+[package]
+name = "resonance"
+description = "A modern, local-first music player"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "resonance"
+path = "src/main.rs"
+
+[dependencies]
+mp-core.workspace = true
+mp-ui.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+egui.workspace = true
+eframe.workspace = true
+
+[profile.dev]
+opt-level = 1
+
+# Audio/image decoding is unusably slow in an unoptimised debug build.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+# Thin rather than fat: measured on this dependency tree, fat LTO saves about
+# 800 KB of a 24 MB binary (3.4%) and costs minutes per build. That is a bad
+# trade while developing and a fine one when shipping, so it lives in `dist`
+# below instead of here.
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# The profile releases are cut from.
+#
+# `cargo build --profile dist` — slower to build, marginally smaller and
+# better optimised. Everything else is inherited, so the two cannot drift
+# apart in any way that matters.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+# Panic behaviour is deliberately left alone. `panic = "abort"` would shave a
+# little more off, but it would also turn a recoverable fault into an
+# immediate process death mid-playback, and the size it saves is not worth
+# changing how the app fails.

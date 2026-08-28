@@ -1,0 +1,29 @@
+[package]
+name = "mp-ui"
+description = "egui interface, theme and visualizers for Resonance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mp-core.workspace = true
+mp-audio.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_extras.workspace = true
+bytemuck.workspace = true
+image.workspace = true
+rfd.workspace = true
+raw-window-handle = "0.6"
+serde.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[dev-dependencies]
+naga.workspace = true
+# Playlist state tests build a small library fixture directly.
+rusqlite.workspace = true

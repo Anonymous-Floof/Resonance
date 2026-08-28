@@ -1,0 +1,27 @@
+[package]
+name = "mp-core"
+description = "Library, playlists, config and similarity for Resonance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+directories.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# --- library index ---
+rusqlite.workspace = true
+lofty.workspace = true
+walkdir.workspace = true
+rayon.workspace = true
+image.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+zip = { version = "7", default-features = false, features = ["deflate-flate2"] }
