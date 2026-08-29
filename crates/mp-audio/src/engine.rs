@@ -30,7 +30,7 @@ use crate::dsp::eq::Bank;
 use crate::dsp::limiter::Settings as LimiterSettings;
 use crate::error::{AudioError, Result};
 use crate::gapless::{Pending, Seam};
-use crate::queue::Queue;
+use crate::queue::{Queue, QueueEntry};
 use crate::resample::Resampler;
 use crate::shared::{Shared, Status, slider_to_gain};
 use crate::viz::{self, Monitor};
@@ -70,6 +70,8 @@ pub enum Command {
     PlayNext(Vec<PathBuf>),
     /// Jump to a queue entry by its index.
     JumpTo(usize),
+    /// Drop one queue entry by its index. Ignored for the playing track.
+    Remove(usize),
 
     Play,
     Pause,
@@ -132,8 +134,13 @@ pub enum Event {
     QueueFinished,
     /// A track could not be played; playback has already skipped past it.
     TrackFailed { path: PathBuf, reason: String },
-    /// The queue changed shape (length or ordering).
-    QueueChanged { len: usize },
+    /// The queue changed: different tracks, a different order, or both.
+    ///
+    /// Carries the whole thing in play order rather than just a length,
+    /// because that is the only way a caller can show what is coming next
+    /// under shuffle — the order is the engine's, and it is rebuilt whenever a
+    /// shuffled queue wraps.
+    QueueChanged { entries: Vec<QueueEntry> },
     /// The output device was opened or re-opened.
     DeviceChanged { name: String, sample_rate: u32 },
 }
@@ -203,6 +210,7 @@ impl AudioEngine {
             dsp: None,
             seam: Seam::new(),
             gapless: settings.gapless,
+            queue_revision: 0,
         };
 
         std::thread::Builder::new()
@@ -399,6 +407,9 @@ struct Worker {
     seam: Seam,
     /// Whether to join tracks without flushing the ring.
     gapless: bool,
+
+    /// The queue revision last published to the UI.
+    queue_revision: u64,
 }
 
 /// The equalizer as the user configured it, before it becomes coefficients.
@@ -439,6 +450,7 @@ impl Worker {
             }
 
             self.advance_across_seams();
+            self.sync_queue();
 
             let did_work = self.pump_audio();
 
@@ -450,6 +462,23 @@ impl Worker {
         }
 
         tracing::debug!("audio worker stopped");
+    }
+
+    /// Publish the queue if it has changed since it was last sent.
+    ///
+    /// The single place a `QueueChanged` is emitted. Every mutation bumps the
+    /// queue's revision, so nothing has to remember to announce itself — which
+    /// is what keeps the reshuffle-on-wrap case, the one with no command behind
+    /// it, from silently going unreported.
+    fn sync_queue(&mut self) {
+        let revision = self.queue.revision();
+        if revision == self.queue_revision {
+            return;
+        }
+        self.queue_revision = revision;
+
+        let entries = self.queue.entries();
+        self.emit(Event::QueueChanged { entries });
     }
 
     /// Open the device and wire up the ring buffer and callback.
@@ -642,18 +671,13 @@ impl Worker {
     fn handle(&mut self, command: Command) {
         match command {
             Command::PlayNow { tracks, start } => {
-                let len = tracks.len();
                 self.queue.replace(tracks, start);
-                self.emit(Event::QueueChanged { len });
                 self.load_current();
             }
 
             Command::Enqueue(tracks) => {
                 let was_empty = self.queue.is_empty();
                 self.queue.extend(tracks);
-                self.emit(Event::QueueChanged {
-                    len: self.queue.len(),
-                });
                 // Adding to an empty, idle queue should start playing it.
                 if was_empty {
                     self.load_current();
@@ -662,15 +686,16 @@ impl Worker {
 
             Command::PlayNext(tracks) => {
                 self.queue.play_next(tracks);
-                self.emit(Event::QueueChanged {
-                    len: self.queue.len(),
-                });
             }
 
             Command::JumpTo(index) => {
                 if self.queue.jump_to(index).is_some() {
                     self.load_current();
                 }
+            }
+
+            Command::Remove(index) => {
+                self.queue.remove(index);
             }
 
             Command::Play => {
@@ -761,7 +786,6 @@ impl Worker {
             Command::ClearQueue => {
                 self.queue.clear();
                 self.stop();
-                self.emit(Event::QueueChanged { len: 0 });
             }
 
             Command::ReopenDevice {

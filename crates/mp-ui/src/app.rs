@@ -94,6 +94,31 @@ pub struct ResonanceApp {
     /// Seconds since the visualiser last ran, so a view that has been off
     /// screen does not resume with a stale delta.
     viz_dt: f32,
+
+    /// The Home page's figures, and the library epoch they were read at.
+    ///
+    /// Cached because every one of them is a query, and Home is redrawn on
+    /// every frame that anything animates.
+    home: HomeData,
+    home_epoch: Option<u64>,
+
+    /// The queue panel's rows, and the queue revision they were built from.
+    ///
+    /// Resolving a queue entry to a library track is a lookup per entry, so it
+    /// is done when the engine republishes the queue rather than per frame.
+    queue_rows: Vec<views::queue::Row>,
+    queue_revision: Option<u64>,
+}
+
+/// Everything the Home page shows, read in one pass.
+#[derive(Default)]
+struct HomeData {
+    totals: mp_core::library::stats::Totals,
+    activity: Vec<u32>,
+    favourites: Vec<mp_core::library::stats::PlayedTrack>,
+    recent: Vec<mp_core::library::Track>,
+    artists: Vec<mp_core::library::stats::Ranked>,
+    albums: Vec<mp_core::library::stats::Ranked>,
 }
 
 /// The smallest the window can be dragged to.
@@ -185,6 +210,10 @@ impl ResonanceApp {
             tag_editor: TagEditor::default(),
             visualizers: Visualizers::new(),
             viz_dt: 0.0,
+            home: HomeData::default(),
+            home_epoch: None,
+            queue_rows: Vec::new(),
+            queue_revision: None,
         }
     }
 
@@ -286,6 +315,11 @@ impl ResonanceApp {
     }
 
     /// Start playing the list currently on screen, from `index`.
+    /// The path of one row of the visible list.
+    fn visible_path(&self, index: usize) -> Option<std::path::PathBuf> {
+        self.library.tracks().get(index).map(|t| t.path.clone())
+    }
+
     fn play_visible(&mut self, index: usize) {
         let paths = self.library.visible_paths();
         self.player.play(paths, index);
@@ -874,24 +908,214 @@ impl ResonanceApp {
                     View::Equalizer => self.equalizer_view(ui),
                     View::Visualizer => self.visualizer_view(ui),
                     View::Playlists => self.playlists_view(ui),
-                    View::Home => {
-                        widgets::empty_state(
-                            ui,
-                            &self.theme,
-                            self.view.icon(),
-                            self.view.empty_title(),
-                            self.view.empty_body(),
-                        );
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(m.space(2.0));
-                            if widgets::accent_button(ui, &self.theme, "Browse songs").clicked() {
-                                self.go_to(View::Songs);
-                            }
-                        });
-                    }
+                    View::Home => self.home_view(ui),
                     _ => self.library_view(ui),
                 }
             });
+    }
+
+    // -----------------------------------------------------------------------
+    // Home
+    // -----------------------------------------------------------------------
+
+    /// Re-read the statistics if anything behind them has changed.
+    fn refresh_home(&mut self) {
+        let epoch = self.library.stats_epoch();
+        if self.home_epoch == Some(epoch) {
+            return;
+        }
+        self.home_epoch = Some(epoch);
+
+        let library = self.library.library();
+        let mut home = HomeData::default();
+
+        // A statistic that cannot be read is not worth taking the page down
+        // for: each one falls back to empty and the rest still render.
+        match library.totals() {
+            Ok(totals) => home.totals = totals,
+            Err(err) => tracing::warn!("could not read listening totals: {err:#}"),
+        }
+        home.activity = library
+            .activity(views::home::ACTIVITY_DAYS)
+            .unwrap_or_default();
+        home.favourites = library
+            .top_tracks(views::home::LIST_LIMIT)
+            .unwrap_or_default();
+        home.recent = library
+            .recently_played_tracks(views::home::LIST_LIMIT)
+            .unwrap_or_default();
+        home.artists = library
+            .top_artists(views::home::CARD_LIMIT)
+            .unwrap_or_default();
+        home.albums = library
+            .top_albums(views::home::CARD_LIMIT)
+            .unwrap_or_default();
+
+        self.home = home;
+    }
+
+    fn home_view(&mut self, ui: &mut Ui) {
+        self.refresh_home();
+
+        let shortcuts: Vec<views::home::Shortcut> = self
+            .playlists
+            .playlists()
+            .iter()
+            .take(views::home::CARD_LIMIT)
+            .map(|playlist| views::home::Shortcut {
+                id: playlist.id,
+                name: playlist.name.clone(),
+                tracks: playlist.track_count as usize,
+            })
+            .collect();
+
+        let outcome = views::home::show(
+            ui,
+            &self.theme,
+            views::home::Data {
+                totals: &self.home.totals,
+                activity: &self.home.activity,
+                favourites: &self.home.favourites,
+                recent: &self.home.recent,
+                artists: &self.home.artists,
+                albums: &self.home.albums,
+                playlists: &shortcuts,
+            },
+        );
+
+        if let Some((source, index)) = outcome.play {
+            // The whole list is queued behind the row, so pressing a favourite
+            // starts a run through the favourites rather than stranding you on
+            // a queue of one.
+            let paths: Vec<std::path::PathBuf> = match source {
+                views::home::Source::Favourites => self
+                    .home
+                    .favourites
+                    .iter()
+                    .map(|played| played.track.path.clone())
+                    .collect(),
+                views::home::Source::Recent => {
+                    self.home.recent.iter().map(|t| t.path.clone()).collect()
+                }
+            };
+            self.player.play(paths, index);
+        }
+
+        if let Some(id) = outcome.open_artist
+            && let Some(entry) = self.home.artists.iter().find(|a| a.id == id)
+        {
+            let name = entry.name.clone();
+            self.library.open(Focus::Artist { id, name });
+            self.view = View::Artists;
+        }
+
+        if let Some(id) = outcome.open_album
+            && let Some(entry) = self.home.albums.iter().find(|a| a.id == id)
+        {
+            let focus = Focus::Album {
+                id,
+                title: entry.name.clone(),
+                artist: entry.detail.clone(),
+            };
+            self.library.open(focus);
+            self.view = View::Albums;
+        }
+
+        if let Some(id) = outcome.open_playlist {
+            self.playlists.open(self.library.library(), id);
+            self.view = View::Playlists;
+        }
+
+        if outcome.browse {
+            self.go_to(View::Songs);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Queue
+    // -----------------------------------------------------------------------
+
+    /// Rebuild the queue rows if the engine has republished the queue.
+    fn refresh_queue_rows(&mut self) {
+        let revision = self.player.queue_revision();
+        if self.queue_revision == Some(revision) {
+            return;
+        }
+        self.queue_revision = Some(revision);
+
+        self.queue_rows = self
+            .player
+            .queue()
+            .iter()
+            .map(|entry| {
+                // A queued file need not be in the library - playing something
+                // from outside it is allowed - so fall back to the filename.
+                match self.library.track_at_path(&entry.path) {
+                    Some(track) => views::queue::Row {
+                        index: entry.index,
+                        title: track.title.clone(),
+                        subtitle: track.subtitle(),
+                        duration: track.duration,
+                    },
+                    None => views::queue::Row {
+                        index: entry.index,
+                        title: entry
+                            .path
+                            .file_stem()
+                            .map_or_else(String::new, |s| s.to_string_lossy().into()),
+                        subtitle: String::new(),
+                        duration: None,
+                    },
+                }
+            })
+            .collect();
+    }
+
+    fn queue_panel(&mut self, ui: &mut Ui) {
+        if !self.config.window.queue_panel_open {
+            return;
+        }
+
+        self.refresh_queue_rows();
+
+        let m = self.theme.metrics;
+        let cursor = self.player.queue_cursor();
+
+        let outcome = egui::Panel::right("queue")
+            .exact_size(m.queue_width)
+            .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(col(self.theme.palette.bg_surface))
+                    .inner_margin(egui::Margin::symmetric(
+                        m.space(1.5) as i8,
+                        m.space(1.5) as i8,
+                    )),
+            )
+            .show(ui, |ui| {
+                views::queue::show(
+                    ui,
+                    &self.theme,
+                    &self.queue_rows,
+                    cursor,
+                    self.config.playback.play_on_single_click,
+                )
+            })
+            .inner;
+
+        if let Some(index) = outcome.jump {
+            self.player.jump_to(index);
+        }
+        if let Some(index) = outcome.remove {
+            self.player.remove_from_queue(index);
+        }
+        if outcome.clear {
+            self.player.clear_queue();
+        }
+        if outcome.close {
+            self.config.window.queue_panel_open = false;
+            self.touch();
+        }
     }
 
     /// One of the five library sections, or the tracks of whatever is open.
@@ -1165,6 +1389,14 @@ impl ResonanceApp {
 
         if let Some(index) = outcome.play {
             self.play_visible(index);
+        }
+        if let Some(index) = outcome.play_next {
+            let paths = self.visible_path(index).into_iter().collect();
+            self.player.play_next(paths);
+        }
+        if let Some(index) = outcome.enqueue {
+            let paths = self.visible_path(index).into_iter().collect();
+            self.player.enqueue(paths);
         }
         if let Some(id) = outcome.open_artist {
             let name = self
@@ -2574,7 +2806,11 @@ impl eframe::App for ResonanceApp {
             self.adaptive.clear();
             self.visualizers.set_cover(None);
         }
-        self.player.update(dt, &mut self.library);
+        self.player.update(
+            dt,
+            &mut self.library,
+            self.config.privacy.track_play_history,
+        );
         self.follow_artwork(ui.ctx(), dt);
         self.playlists.update(self.library.library());
         self.top_up_radio();
@@ -2645,6 +2881,7 @@ impl eframe::App for ResonanceApp {
 
         self.nav_rail(ui);
         self.player_bar(ui);
+        self.queue_panel(ui);
         self.content(ui);
 
         self.notices(ui);
@@ -2672,6 +2909,10 @@ impl eframe::App for ResonanceApp {
     }
 
     fn on_exit(&mut self) {
+        // Bank the tail of whatever was playing before the process goes away.
+        self.player
+            .flush_listening(&mut self.library, self.config.privacy.track_play_history);
+
         // Fold the write-ahead log back into the database so the index is one
         // self-contained file when the app is not running. It matters most in
         // portable mode, where the whole folder gets copied to a stick — a

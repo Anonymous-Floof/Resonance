@@ -19,10 +19,10 @@ use rusqlite::Connection;
 pub use rusqlite::Connection as Handle;
 
 /// Bump this and add a step to [`MIGRATIONS`] for every schema change.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Ordered schema steps. Index `n` upgrades version `n` to `n + 1`.
-const MIGRATIONS: &[&str] = &[V1, V2, V3];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
 
 /// Open (or create) the index at `path`.
 pub fn open(path: &Path) -> Result<Connection> {
@@ -330,6 +330,41 @@ CREATE INDEX tag_edits_recent ON tag_edits(edited_at DESC);
 CREATE INDEX tag_edits_track ON tag_edits(track_id);
 "#;
 
+/// Measured listening time.
+///
+/// Added with threshold play counting. A play used to be recorded the moment a
+/// track started, which counted a two-second skip the same as a full listen;
+/// it is now recorded once the track has actually been heard, and how much was
+/// heard is worth keeping so total listening time is a measurement rather than
+/// an estimate from durations.
+///
+/// Rows written before this column existed stay NULL, which the statistics
+/// treat as "unknown" rather than as a measured zero.
+const V4: &str = r#"
+ALTER TABLE play_history ADD COLUMN seconds REAL;
+"#;
+
+/// Listening time that is actually the time listened.
+///
+/// The first attempt at this recorded a listen's duration once, at the moment
+/// it crossed the threshold that makes it count as a play — so a four-minute
+/// track played in full was recorded as two minutes and the second half was
+/// never counted at all. Totals came out at roughly half of reality, and the
+/// error compounded with every track.
+///
+/// The mistake was letting one number answer two questions. The threshold
+/// decides whether something counts as a *play*; it has no business deciding
+/// how long you listened. Listening is now accumulated per track for every
+/// second that actually plays, whether or not the listen was ever long enough
+/// to count.
+///
+/// `play_history.seconds` is superseded and no longer written. It is left in
+/// place because dropping a column rebuilds the whole table and would buy
+/// nothing.
+const V5: &str = r#"
+ALTER TABLE tracks ADD COLUMN listened_ms INTEGER NOT NULL DEFAULT 0;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +413,89 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    /// The upgrade every existing installation actually takes.
+    #[test]
+    fn upgrading_from_three_adds_measured_listening_without_losing_history() {
+        let db = Connection::open_in_memory().unwrap();
+        configure(&db).unwrap();
+
+        // Build a database at schema 3 — the version shipped before listening
+        // time was measured — and put real history in it.
+        db.execute_batch("BEGIN").unwrap();
+        for step in &MIGRATIONS[..3] {
+            db.execute_batch(step).unwrap();
+        }
+        db.execute_batch("PRAGMA user_version = 3").unwrap();
+        db.execute_batch("COMMIT").unwrap();
+
+        db.execute(
+            "INSERT INTO tracks (
+                 id, path, folder, file_name, mtime, size, title, sort_title,
+                 play_count, added_at, last_seen_at
+             ) VALUES (1, '/a/b.mp3', '/a', 'b.mp3', 1, 2, 'B', 'b', 3, 0, 0)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO play_history (track_id, played_at) VALUES (1, 100), (1, 200)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&db).unwrap();
+
+        let version: i64 = db
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, i64::from(SCHEMA_VERSION));
+
+        let (rows, plays): (i64, i64) = db
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM play_history),
+                        (SELECT play_count FROM tracks WHERE id = 1)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rows, 2, "the migration lost listening history");
+        assert_eq!(plays, 3, "the migration lost a play count");
+
+        // Listening starts from zero rather than being back-filled: the
+        // figures the old model produced were wrong, and seeding from them
+        // would bake that error in as data.
+        let listened: i64 = db
+            .query_row("SELECT listened_ms FROM tracks WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(listened, 0);
+
+        // History that predates the column is unmeasured, not measured as zero.
+        let unmeasured: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM play_history WHERE seconds IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unmeasured, 2);
+
+        // And the column accepts a measurement from here on.
+        db.execute(
+            "INSERT INTO play_history (track_id, played_at, seconds) VALUES (1, 300, 42.5)",
+            [],
+        )
+        .unwrap();
+        let secs: f64 = db
+            .query_row(
+                "SELECT seconds FROM play_history WHERE played_at = 300",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!((secs - 42.5).abs() < f64::EPSILON);
     }
 
     /// Deleting a track has to take its playlist entries, history and analysis

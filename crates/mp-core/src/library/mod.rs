@@ -25,6 +25,7 @@ pub mod playlist;
 pub mod query;
 pub mod similar;
 pub mod smart;
+pub mod stats;
 pub mod tags;
 
 use std::collections::HashSet;
@@ -346,6 +347,47 @@ impl Library {
     /// the history that recency-aware shuffle and auto-radio read.
     pub fn record_play(&self, id: TrackId) -> Result<()> {
         playlist::record_play(&self.connection, id, now_unix())
+    }
+
+    /// Add to the time a track has been listened to.
+    ///
+    /// Separate from [`record_play`](Self::record_play) because a play is a
+    /// one-off threshold decision and listening is a quantity that keeps
+    /// growing while the audio plays.
+    pub fn add_listening(&self, id: TrackId, seconds: f64) -> Result<()> {
+        playlist::add_listening(&self.connection, id, seconds)
+    }
+
+    // -- statistics --------------------------------------------------------
+
+    /// A summary of the library and everything listened to in it.
+    pub fn totals(&self) -> Result<stats::Totals> {
+        stats::totals(&self.connection)
+    }
+
+    /// The most played tracks, best first.
+    pub fn top_tracks(&self, limit: usize) -> Result<Vec<stats::PlayedTrack>> {
+        stats::top_tracks(&self.connection, limit)
+    }
+
+    /// The most played artists, best first.
+    pub fn top_artists(&self, limit: usize) -> Result<Vec<stats::Ranked>> {
+        stats::top_artists(&self.connection, limit)
+    }
+
+    /// The most played albums, best first.
+    pub fn top_albums(&self, limit: usize) -> Result<Vec<stats::Ranked>> {
+        stats::top_albums(&self.connection, limit)
+    }
+
+    /// The tracks played most recently, newest first.
+    pub fn recently_played_tracks(&self, limit: usize) -> Result<Vec<Track>> {
+        stats::recent(&self.connection, limit)
+    }
+
+    /// Plays per day over the last `days` days, oldest bucket first.
+    pub fn activity(&self, days: usize) -> Result<Vec<u32>> {
+        stats::activity(&self.connection, days, now_unix())
     }
 
     /// The id of a track by path, for reconciling a queue with the index.

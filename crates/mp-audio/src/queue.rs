@@ -55,6 +55,18 @@ impl Rng {
     }
 }
 
+/// One queue entry as anything outside the engine sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueEntry {
+    /// Index into the queue's track list.
+    ///
+    /// This is what [`Command::JumpTo`](crate::engine::Command::JumpTo) takes,
+    /// so a list rendered from these can send back the index of whatever was
+    /// clicked without knowing anything about how shuffle reordered it.
+    pub index: usize,
+    pub path: PathBuf,
+}
+
 /// An ordered list of tracks plus a cursor.
 pub struct Queue {
     /// Every track, in the order it was added.
@@ -71,6 +83,14 @@ pub struct Queue {
     shuffle: ShuffleMode,
     repeat: RepeatMode,
     rng: Rng,
+
+    /// Bumped whenever the contents or the play order change.
+    ///
+    /// Lets the engine notice that the queue needs republishing without every
+    /// mutating path having to remember to say so — which matters most for the
+    /// one that is easy to forget: a shuffled queue reshuffles itself when it
+    /// wraps, mid-playback, with no command involved.
+    revision: u64,
 }
 
 impl Default for Queue {
@@ -88,6 +108,7 @@ impl Queue {
             shuffle: ShuffleMode::Off,
             repeat: RepeatMode::Off,
             rng: Rng::from_entropy(),
+            revision: 0,
         }
     }
 
@@ -126,6 +147,24 @@ impl Queue {
         self.order.get(self.cursor).copied()
     }
 
+    /// A counter that changes whenever the contents or the order change.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// The queue in play order, ready to render.
+    pub fn entries(&self) -> Vec<QueueEntry> {
+        self.order
+            .iter()
+            .filter_map(|&index| {
+                self.tracks.get(index).map(|path| QueueEntry {
+                    index,
+                    path: path.clone(),
+                })
+            })
+            .collect()
+    }
+
     /// Replace the queue and start at `start` (an index into `tracks`).
     pub fn replace(&mut self, tracks: Vec<PathBuf>, start: usize) {
         self.tracks = tracks;
@@ -152,6 +191,7 @@ impl Queue {
         if added.is_empty() {
             return;
         }
+        self.revision = self.revision.wrapping_add(1);
 
         if self.shuffle == ShuffleMode::Off {
             self.order.extend(added);
@@ -175,6 +215,11 @@ impl Queue {
         let first_new = self.tracks.len();
         self.tracks.extend(tracks);
 
+        if self.tracks.len() == first_new {
+            return;
+        }
+        self.revision = self.revision.wrapping_add(1);
+
         let start = (self.cursor + 1).min(self.order.len());
         for (offset, index) in (first_new..self.tracks.len()).enumerate() {
             self.order.insert(start + offset, index);
@@ -182,6 +227,7 @@ impl Queue {
     }
 
     pub fn clear(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
         self.tracks.clear();
         self.order.clear();
         self.cursor = 0;
@@ -291,6 +337,42 @@ impl Queue {
         self.current()
     }
 
+    /// Drop one track from the queue, by its index into `tracks`.
+    ///
+    /// Removing the track that is currently playing is refused: it would leave
+    /// the engine decoding something the queue no longer holds, and "stop
+    /// playing" is a different intent with its own control.
+    ///
+    /// Returns whether anything was removed.
+    pub fn remove(&mut self, index: usize) -> bool {
+        if index >= self.tracks.len() || self.current_index() == Some(index) {
+            return false;
+        }
+
+        let Some(at) = self.order.iter().position(|&i| i == index) else {
+            return false;
+        };
+
+        self.revision = self.revision.wrapping_add(1);
+        self.tracks.remove(index);
+        self.order.remove(at);
+
+        // Every index above the hole shifts down with it.
+        for slot in &mut self.order {
+            if *slot > index {
+                *slot -= 1;
+            }
+        }
+
+        // Removing something already played keeps the cursor over the same
+        // entry; removing something still to come leaves it where it is.
+        if at < self.cursor {
+            self.cursor -= 1;
+        }
+
+        true
+    }
+
     /// Jump to a specific track by its index into `tracks`.
     pub fn jump_to(&mut self, index: usize) -> Option<&Path> {
         let at = self.order.iter().position(|&i| i == index)?;
@@ -319,6 +401,7 @@ impl Queue {
     /// had just removed. It measurably did: over two hundred orderings that
     /// took the average from about 0.3 clumped pairs to about 1.0.
     fn rebuild_order(&mut self, pinned: Option<usize>) {
+        self.revision = self.revision.wrapping_add(1);
         self.order = (0..self.tracks.len()).collect();
 
         if self.shuffle == ShuffleMode::Off {
@@ -392,6 +475,157 @@ mod tests {
         let mut q = Queue::new();
         q.replace(paths(names), 0);
         q
+    }
+
+    #[test]
+    fn entries_are_published_in_play_order_not_insertion_order() {
+        let mut q = Queue::seeded(7);
+        q.replace(paths(&["a", "b", "c", "d", "e", "f"]), 0);
+        q.set_shuffle(ShuffleMode::Random);
+
+        let entries = q.entries();
+        assert_eq!(entries.len(), 6);
+
+        // The published order is the order the engine will actually play, and
+        // each entry carries the index `jump_to` takes for that track.
+        let published: Vec<usize> = entries.iter().map(|e| e.index).collect();
+        assert_eq!(published, q.order().to_vec());
+
+        for entry in &entries {
+            assert_eq!(q.tracks()[entry.index], entry.path);
+        }
+    }
+
+    #[test]
+    fn the_revision_changes_when_a_shuffled_queue_reshuffles_on_wrap() {
+        // The case with no command behind it: nothing asked for a new order,
+        // the queue simply reached the end and made one. A panel showing what
+        // is coming next has to be told, or it displays an order that is no
+        // longer true.
+        let mut q = Queue::seeded(11);
+        q.replace(paths(&["a", "b", "c", "d", "e"]), 0);
+        q.set_shuffle(ShuffleMode::Random);
+        q.set_repeat(RepeatMode::All);
+
+        // Walk to the last entry without wrapping.
+        for _ in 0..q.len() - 1 {
+            q.next();
+        }
+        let before = q.revision();
+
+        q.next();
+
+        assert_ne!(
+            q.revision(),
+            before,
+            "wrapping reshuffled the order without announcing it"
+        );
+    }
+
+    #[test]
+    fn advancing_without_reshuffling_leaves_the_revision_alone() {
+        let mut q = queue_of(&["a", "b", "c"]);
+        let before = q.revision();
+
+        q.next();
+        q.previous();
+
+        assert_eq!(
+            q.revision(),
+            before,
+            "moving the cursor is not a change of contents or order"
+        );
+    }
+
+    #[test]
+    fn every_mutation_bumps_the_revision() {
+        let mut q = Queue::new();
+        let mut seen = q.revision();
+
+        let mut changed = |q: &Queue, what: &str| {
+            assert_ne!(q.revision(), seen, "{what} did not bump the revision");
+            seen = q.revision();
+        };
+
+        q.replace(paths(&["a", "b"]), 0);
+        changed(&q, "replace");
+
+        q.extend(paths(&["c"]));
+        changed(&q, "extend");
+
+        q.play_next(paths(&["d"]));
+        changed(&q, "play_next");
+
+        q.remove(3);
+        changed(&q, "remove");
+
+        q.set_shuffle(ShuffleMode::Random);
+        changed(&q, "set_shuffle");
+
+        q.clear();
+        changed(&q, "clear");
+    }
+
+    #[test]
+    fn an_empty_addition_is_not_a_change() {
+        let mut q = queue_of(&["a", "b"]);
+        let before = q.revision();
+
+        q.extend(paths(&[]));
+        q.play_next(paths(&[]));
+
+        assert_eq!(q.revision(), before);
+    }
+
+    #[test]
+    fn the_playing_track_cannot_be_removed() {
+        let mut q = queue_of(&["a", "b", "c"]);
+        assert_eq!(q.current(), Some(Path::new("a")));
+
+        assert!(!q.remove(0), "removing what is playing must be refused");
+        assert_eq!(q.len(), 3);
+        assert_eq!(q.current(), Some(Path::new("a")));
+    }
+
+    #[test]
+    fn removing_keeps_the_rest_of_the_order_pointing_at_the_right_tracks() {
+        let mut q = queue_of(&["a", "b", "c", "d"]);
+
+        assert!(q.remove(1), "b is not playing, so it can go");
+        assert_eq!(q.len(), 3);
+
+        // Every surviving index still resolves to the track it named before.
+        let entries = q.entries();
+        let names: Vec<String> = entries
+            .iter()
+            .map(|e| e.path.display().to_string())
+            .collect();
+        assert_eq!(names, vec!["a", "c", "d"]);
+
+        for entry in &entries {
+            assert_eq!(q.tracks()[entry.index], entry.path);
+        }
+
+        // And playback still walks the remainder in order.
+        assert_eq!(q.next(), Some(Path::new("c")));
+        assert_eq!(q.next(), Some(Path::new("d")));
+    }
+
+    #[test]
+    fn removing_something_already_played_keeps_the_cursor_on_the_same_track() {
+        let mut q = queue_of(&["a", "b", "c", "d"]);
+        q.next();
+        q.next();
+        assert_eq!(q.current(), Some(Path::new("c")));
+
+        assert!(q.remove(0), "a is behind the cursor");
+
+        assert_eq!(
+            q.current(),
+            Some(Path::new("c")),
+            "the cursor followed the hole instead of staying with the track"
+        );
+        assert_eq!(q.next(), Some(Path::new("d")));
     }
 
     #[test]

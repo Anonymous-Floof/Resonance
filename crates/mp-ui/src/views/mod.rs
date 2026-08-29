@@ -1,12 +1,11 @@
 //! Top-level content views selected from the nav rail.
-//!
-//! In M0 the library does not exist yet, so every list view renders an empty
-//! state. Settings is fully wired, because the config layer it edits is real.
 
 pub mod browse;
 pub mod equalizer;
+pub mod home;
 pub mod now_playing;
 pub mod playlists;
+pub mod queue;
 pub mod settings;
 pub mod songs;
 pub mod tag_editor;

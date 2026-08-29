@@ -54,6 +54,9 @@ want something better to play it with than what came with the operating system.
 - Shuffle — off, true random, or smart shuffle that spaces out artists and
   avoids what you heard recently
 - Repeat, sleep timer, silence trimming, resume position on long tracks
+- **Queue panel** showing what is coming next in the order it will actually
+  play, including under shuffle — jump to anything, drop anything, or clear it
+- Right-click any track for **Play next** or **Add to queue**
 - Output device picker and buffer size control
 
 **Playlists**
@@ -64,6 +67,17 @@ want something better to play it with than what came with the operating system.
   suggestion saying *why* it was suggested
 - **Auto-radio** — when the queue runs dry, keep going from where you are
 - Import and export as standard `.m3u8`
+
+**Listening statistics**
+- A **Home page** that fills in as you listen: total listening time, plays,
+  how much of your library you have actually explored, and a month of activity
+- Your most played tracks, artists and albums, and a way straight back into
+  anything you were recently listening to
+- A play is only counted once you have **actually heard** half the track (or
+  four minutes, whichever is sooner), so skipping through an album does not
+  inflate anything
+- All of it stays on your machine, and it can be switched off entirely in
+  Settings under Privacy
 
 **Interface**
 - Six visualizers: spectrum bars, oscilloscope, radial, waveform ribbon,

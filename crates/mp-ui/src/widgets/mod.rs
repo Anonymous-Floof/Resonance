@@ -521,6 +521,56 @@ pub fn scrubber(
 }
 
 /// A horizontal rule matching the theme's border colour.
+/// Vertical centres for two stacked lines of text inside `rect`.
+///
+/// Derived from the font sizes rather than from fractions of the row height.
+/// A fraction that looks right at one density overlaps at another: a 38 px
+/// compact row carrying 13 px and 12 px text has no room for the gaps a 52 px
+/// comfortable row can afford, and the two lines collide.
+pub fn stacked_lines(
+    rect: egui::Rect,
+    top: &egui::FontId,
+    bottom: &egui::FontId,
+    gap: f32,
+) -> (f32, f32) {
+    let total = top.size + gap + bottom.size;
+    let start = rect.center().y - total * 0.5;
+
+    (
+        start + top.size * 0.5,
+        start + top.size + gap + bottom.size * 0.5,
+    )
+}
+
+/// Cut `text` down to `width`, ending in an ellipsis when it does not fit.
+///
+/// Returns an empty string when not even the ellipsis fits, which is the only
+/// honest answer for a column that narrow.
+pub fn elide(ui: &Ui, text: &str, font: &egui::FontId, width: f32) -> String {
+    let measure = |s: &str| {
+        ui.painter()
+            .layout_no_wrap(s.to_owned(), font.clone(), egui::Color32::WHITE)
+            .rect
+            .width()
+    };
+
+    if measure(text) <= width {
+        return text.to_owned();
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut keep = chars.len();
+    while keep > 0 {
+        keep -= 1;
+        let candidate: String = chars[..keep].iter().collect::<String>() + "…";
+        if measure(&candidate) <= width {
+            return candidate;
+        }
+    }
+
+    String::new()
+}
+
 pub fn separator(ui: &mut Ui, theme: &Theme) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
     if ui.is_rect_visible(rect) {

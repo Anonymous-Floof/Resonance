@@ -600,6 +600,31 @@ pub fn record_play(connection: &Connection, track: TrackId, now: i64) -> Result<
     Ok(())
 }
 
+/// Add to the time a track has been listened to.
+///
+/// Deliberately separate from [`record_play`]. A play is a threshold decision
+/// made once; listening is a quantity that keeps growing for as long as the
+/// audio keeps playing, and time spent on a track that was skipped before it
+/// counted as a play is still time spent listening.
+///
+/// Callers accumulate in memory and flush periodically, so this is an
+/// occasional indexed update rather than something on a hot path.
+pub fn add_listening(connection: &Connection, track: TrackId, seconds: f64) -> Result<()> {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Ok(());
+    }
+
+    // Milliseconds, so the running total stays an exact integer no matter how
+    // many thousands of small flushes accumulate into it.
+    let millis = (seconds * 1000.0).round() as i64;
+    connection.execute(
+        "UPDATE tracks SET listened_ms = listened_ms + ?2 WHERE id = ?1",
+        params![track, millis],
+    )?;
+
+    Ok(())
+}
+
 /// Trim the history to the most recent `keep` entries.
 ///
 /// The history is only ever read for recency, so an unbounded log of every play

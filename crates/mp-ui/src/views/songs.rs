@@ -49,6 +49,10 @@ pub struct Options {
 pub struct Outcome {
     /// A row was activated: start playing this index of the visible list.
     pub play: Option<usize>,
+    /// Queue this index of the visible list to play after the current track.
+    pub play_next: Option<usize>,
+    /// Append this index of the visible list to the queue.
+    pub enqueue: Option<usize>,
     /// The artist on a row was clicked.
     pub open_artist: Option<i64>,
     /// The album on a row was clicked.
@@ -92,16 +96,29 @@ pub fn show(
                 if widgets::row_activated(&hit.response, options.single_click) {
                     outcome.play = Some(index);
                 }
-                // Right-click, because editing a file is a deliberate act and
-                // does not belong on the row's primary click.
-                if options.tag_editing {
-                    hit.response.context_menu(|ui| {
+                // Right-click, because queueing and editing are both
+                // deliberate acts that do not belong on a row's primary click.
+                hit.response.context_menu(|ui| {
+                    if ui.button("Play next").clicked() {
+                        outcome.play_next = Some(index);
+                        ui.close();
+                    }
+                    if ui.button("Add to queue").clicked() {
+                        outcome.enqueue = Some(index);
+                        ui.close();
+                    }
+
+                    // Only offered when tag editing is on in Settings, so the
+                    // item cannot appear on a read-only install and then
+                    // refuse to work.
+                    if options.tag_editing {
+                        ui.separator();
                         if ui.button("Edit tags…").clicked() {
                             outcome.edit_tags = Some(track.id);
                             ui.close();
                         }
-                    });
-                }
+                    }
+                });
 
                 if hit.artist_clicked {
                     outcome.open_artist = track.artist_id;

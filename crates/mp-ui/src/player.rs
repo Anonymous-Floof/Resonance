@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use mp_audio::engine::{AudioEngine, Command, Event};
+use mp_audio::queue::QueueEntry;
 use mp_core::Config;
 use mp_core::library::Track;
 
@@ -70,6 +71,83 @@ impl NowPlaying {
     }
 }
 
+/// How much of a track has to be heard before it counts as a *play*.
+///
+/// Half of it, or four minutes, whichever comes first — the rule scrobblers
+/// have long since converged on. A skip is not a play: counting one the moment
+/// a track started made a two-second sample and a full listen
+/// indistinguishable.
+///
+/// This threshold decides one thing only, and it is worth being blunt about
+/// why. An earlier version let it decide listening *time* as well, writing the
+/// track's total at the moment the bar was cleared and never adding to it
+/// again — so a four-minute track played end to end was recorded as two
+/// minutes, and seven minutes of listening came out as three. Whether
+/// something counts as a play and how long it was listened to are different
+/// questions, and only the first one has a threshold.
+const PLAY_FRACTION: f64 = 0.5;
+const PLAY_CEILING_SECS: f64 = 240.0;
+
+/// The bar for a track whose duration the container never declared.
+const PLAY_UNKNOWN_SECS: f64 = 30.0;
+
+/// How much listening to bank before writing it down.
+///
+/// Listening is credited every frame but saved periodically: a database write
+/// per frame would be absurd, and losing at most this much to a power cut is a
+/// fair price. It is also flushed whenever the track changes and when the app
+/// closes, so the only way to lose any at all is to be killed mid-track.
+const FLUSH_SECS: f64 = 10.0;
+
+/// Progress through the track currently open.
+#[derive(Debug, Clone)]
+struct Listening {
+    path: PathBuf,
+    /// Seconds of actual playback.
+    ///
+    /// Accumulated from frame time while the engine is playing rather than
+    /// read from the playback position, so pausing does not keep counting and
+    /// dragging the seek bar to the end does not invent listening that never
+    /// happened.
+    heard: f64,
+    /// How much of `heard` has already been written down.
+    flushed: f64,
+    /// What `heard` has to reach for this to count as a play.
+    threshold: f64,
+    /// Whether the play has been counted.
+    counted: bool,
+}
+
+impl Listening {
+    fn new(path: PathBuf, duration: Option<Duration>) -> Self {
+        let threshold = match duration {
+            Some(duration) if duration.as_secs_f64() > 0.0 => {
+                (duration.as_secs_f64() * PLAY_FRACTION).min(PLAY_CEILING_SECS)
+            }
+            // Nothing to take a fraction of; fall back to a flat bar.
+            _ => PLAY_UNKNOWN_SECS,
+        };
+
+        Self {
+            path,
+            heard: 0.0,
+            flushed: 0.0,
+            threshold,
+            counted: false,
+        }
+    }
+
+    /// Listening credited but not yet written down.
+    fn pending(&self) -> f64 {
+        (self.heard - self.flushed).max(0.0)
+    }
+
+    /// Whether this listen has just become a play.
+    fn became_a_play(&self) -> bool {
+        !self.counted && self.heard >= self.threshold
+    }
+}
+
 /// A transient message shown to the user, e.g. a file that would not play.
 #[derive(Debug, Clone)]
 pub struct Notice {
@@ -94,8 +172,25 @@ pub struct Player {
     /// fight the handle for control of it.
     pub scrubbing: Option<f32>,
 
-    /// The paths currently queued, so the list can show what is coming.
-    queue: Vec<PathBuf>,
+    /// The queue in play order, as the engine last reported it.
+    ///
+    /// The engine owns the order — shuffle rearranges it there, and a shuffled
+    /// queue reshuffles itself when it wraps — so this is a mirror of what it
+    /// published, never something the UI computes for itself.
+    queue: Vec<QueueEntry>,
+
+    /// Index into the engine's track list of whatever is playing.
+    current_index: Option<usize>,
+
+    /// Bumped whenever the mirrored queue is replaced.
+    ///
+    /// Resolving a queue entry to a library track is a database lookup, and a
+    /// panel showing the queue would otherwise redo every one of them on every
+    /// frame. This lets that work be cached against something cheap to compare.
+    queue_revision: u64,
+
+    /// Progress towards counting the open track as played.
+    listening: Option<Listening>,
 
     /// The track auto-radio should continue from.
     ///
@@ -129,6 +224,9 @@ impl Player {
             notices: Vec::new(),
             scrubbing: None,
             queue: Vec::new(),
+            current_index: None,
+            queue_revision: 0,
+            listening: None,
             last_played: None,
             wants_radio: false,
         };
@@ -182,11 +280,73 @@ impl Player {
         if paths.is_empty() || start >= paths.len() {
             return;
         }
-        self.queue = paths.clone();
+        // Seeded in the order asked for so the transport works this frame; the
+        // engine corrects it to the real play order on its next event.
+        self.queue_revision = self.queue_revision.wrapping_add(1);
+        self.queue = paths
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, path)| QueueEntry { index, path })
+            .collect();
+
         self.send(Command::PlayNow {
             tracks: paths,
             start,
         });
+    }
+
+    /// Append to the queue without disturbing what is playing.
+    pub fn enqueue(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        self.wants_radio = false;
+        self.send(Command::Enqueue(paths));
+    }
+
+    /// Insert so it plays directly after the current track.
+    pub fn play_next(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        self.wants_radio = false;
+        self.send(Command::PlayNext(paths));
+    }
+
+    /// Jump to a queue entry by its engine-side index.
+    pub fn jump_to(&mut self, index: usize) {
+        self.wants_radio = false;
+        self.send(Command::JumpTo(index));
+    }
+
+    /// Drop one entry from the queue by its engine-side index.
+    ///
+    /// The engine refuses to remove the track it is playing, so this can be
+    /// called for any index without the caller having to check first.
+    pub fn remove_from_queue(&mut self, index: usize) {
+        self.send(Command::Remove(index));
+    }
+
+    pub fn clear_queue(&mut self) {
+        self.wants_radio = false;
+        self.send(Command::ClearQueue);
+    }
+
+    /// The queue in play order.
+    pub fn queue(&self) -> &[QueueEntry] {
+        &self.queue
+    }
+
+    /// A counter that changes whenever [`queue`](Self::queue) is replaced.
+    pub fn queue_revision(&self) -> u64 {
+        self.queue_revision
+    }
+
+    /// Position within [`queue`](Self::queue) of the track playing now.
+    pub fn queue_cursor(&self) -> Option<usize> {
+        let current = self.current_index?;
+        self.queue.iter().position(|entry| entry.index == current)
     }
 
     pub fn queue_len(&self) -> usize {
@@ -276,8 +436,13 @@ impl Player {
     /// Takes the library so a track that starts playing can be shown with its
     /// real title and cover rather than its filename.
     ///
+    /// `track_history` is the user's privacy setting. It gates the write and
+    /// nothing else: listening is still measured in memory so the transport
+    /// behaves identically either way, but with the setting off nothing about
+    /// what was played ever reaches the disk.
+    ///
     /// Returns whether anything changed that warrants a repaint.
-    pub fn update(&mut self, dt: f32, library: &mut LibraryState) -> bool {
+    pub fn update(&mut self, dt: f32, library: &mut LibraryState, track_history: bool) -> bool {
         for notice in &mut self.notices {
             notice.ttl -= dt;
         }
@@ -285,26 +450,76 @@ impl Player {
         self.notices.retain(|n| n.ttl > 0.0);
         let mut changed = expired != self.notices.len();
 
-        let Some(engine) = &self.engine else {
-            return changed;
+        let (playing, events) = {
+            let Some(engine) = &self.engine else {
+                return changed;
+            };
+            (engine.status().is_playing(), engine.poll_events())
         };
-
-        let events = engine.poll_events();
         changed |= !events.is_empty();
+
+        // Credited before the events are drained, so a track that finishes in
+        // this frame is paid for the frame it finished in rather than losing
+        // it to the `TrackStarted` that replaces the accumulator.
+        if playing && let Some(listening) = &mut self.listening {
+            listening.heard += f64::from(dt);
+        }
+
+        // Two separate facts, deliberately. Passing the bar records a play,
+        // once. Time keeps accumulating either way — thirty seconds of a track
+        // you skipped is still thirty seconds you spent listening.
+        if let Some(listening) = &mut self.listening
+            && listening.became_a_play()
+        {
+            listening.counted = true;
+            let path = listening.path.clone();
+
+            if track_history {
+                library.record_play(&path);
+            }
+            changed = true;
+        }
+
+        if let Some(listening) = &mut self.listening
+            && listening.pending() >= FLUSH_SECS
+        {
+            let pending = listening.pending();
+            listening.flushed = listening.heard;
+            let path = listening.path.clone();
+
+            if track_history {
+                library.add_listening(&path, pending);
+            }
+        }
 
         for event in events {
             match event {
-                Event::TrackStarted { path, duration, .. } => {
+                Event::TrackStarted {
+                    path,
+                    index,
+                    duration,
+                } => {
+                    // The outgoing track's last few seconds, before the
+                    // accumulator is replaced and they are lost.
+                    flush(&mut self.listening, library, track_history);
+
                     self.now_playing = Some(match library.track_at_path(&path) {
                         Some(track) => NowPlaying::from_track(&track, duration),
                         None => NowPlaying::from_path(path.clone(), duration),
                     });
-                    library.record_play(&path);
+                    self.current_index = Some(index);
+
+                    // A track that was not heard for long enough simply does
+                    // not count: the accumulator is replaced, never flushed.
+                    self.listening = Some(Listening::new(path.clone(), duration));
                     self.last_played = Some(path);
                 }
 
                 Event::QueueFinished => {
+                    flush(&mut self.listening, library, track_history);
                     self.now_playing = None;
+                    self.current_index = None;
+                    self.listening = None;
                     self.wants_radio = true;
                 }
 
@@ -319,11 +534,22 @@ impl Player {
                     tracing::info!("now using {name} at {sample_rate} Hz");
                 }
 
-                Event::QueueChanged { .. } => {}
+                Event::QueueChanged { entries } => {
+                    self.queue = entries;
+                    self.queue_revision = self.queue_revision.wrapping_add(1);
+                }
             }
         }
 
         changed
+    }
+
+    /// Write down any listening banked but not yet saved.
+    ///
+    /// Called on the way out, so the tail of whatever was playing when the
+    /// window closed is not rounded away by the flush interval.
+    pub fn flush_listening(&mut self, library: &mut LibraryState, track_history: bool) {
+        flush(&mut self.listening, library, track_history);
     }
 
     /// Whether the queue has run out and radio should continue it.
@@ -363,6 +589,30 @@ impl Player {
             is_error,
             ttl: 6.0,
         });
+    }
+}
+
+/// Save whatever listening `listening` has banked.
+///
+/// Free-standing rather than a method so it can be called from inside the
+/// event loop, which already holds a borrow of the player.
+///
+/// The bank is cleared even when history is switched off, so that turning the
+/// setting back on does not suddenly commit everything listened to while it
+/// was off.
+fn flush(listening: &mut Option<Listening>, library: &mut LibraryState, track_history: bool) {
+    let Some(listening) = listening else {
+        return;
+    };
+
+    let pending = listening.pending();
+    if pending <= 0.0 {
+        return;
+    }
+    listening.flushed = listening.heard;
+
+    if track_history {
+        library.add_listening(&listening.path, pending);
     }
 }
 
@@ -428,5 +678,166 @@ mod tests {
         let now = NowPlaying::from_path(PathBuf::from(r"D:\loose\Some Song.mp3"), None);
         assert_eq!(now.title, "Some Song");
         assert_eq!(now.artist, mp_core::library::model::UNKNOWN_ARTIST);
+    }
+
+    fn listening(secs: Option<f64>) -> Listening {
+        Listening::new(
+            PathBuf::from("track.flac"),
+            secs.map(Duration::from_secs_f64),
+        )
+    }
+
+    /// Play `seconds` of `listen`, flushing whenever enough has banked up.
+    ///
+    /// Mirrors what `update` does per frame, so the tests exercise the real
+    /// accounting rather than a simplified version of it.
+    fn play_for(listen: &mut Listening, seconds: f64) -> f64 {
+        let mut saved = 0.0;
+        let frame: f64 = 1.0 / 60.0;
+        let mut elapsed = 0.0;
+
+        while elapsed < seconds {
+            let step = frame.min(seconds - elapsed);
+            listen.heard += step;
+            elapsed += step;
+
+            if listen.pending() >= FLUSH_SECS {
+                saved += listen.pending();
+                listen.flushed = listen.heard;
+            }
+        }
+
+        // What the flush at the end of the track would write.
+        saved += listen.pending();
+        listen.flushed = listen.heard;
+        saved
+    }
+
+    #[test]
+    fn a_track_played_in_full_is_credited_in_full() {
+        // The exact case that exposed the old model: a four-minute track and a
+        // three-minute one, both played end to end, reported as three minutes
+        // in total instead of seven.
+        let mut first = listening(Some(240.0));
+        let mut second = listening(Some(180.0));
+
+        let total = play_for(&mut first, 240.0) + play_for(&mut second, 180.0);
+
+        assert!(
+            (total - 420.0).abs() < 0.01,
+            "seven minutes played must credit seven minutes, got {total}"
+        );
+    }
+
+    #[test]
+    fn crossing_the_play_threshold_does_not_stop_the_clock() {
+        // The precise defect: passing the bar used to write the total once and
+        // never add to it again, so the second half of every track vanished.
+        let mut listen = listening(Some(240.0));
+
+        play_for(&mut listen, 120.0);
+        assert!(listen.became_a_play(), "half way is a play");
+        listen.counted = true;
+
+        let after = play_for(&mut listen, 120.0);
+        assert!(
+            (after - 120.0).abs() < 0.01,
+            "the second half must still be credited, got {after}"
+        );
+        assert!((listen.heard - 240.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn listening_is_credited_in_full_even_when_it_never_becomes_a_play() {
+        // Thirty seconds of a ten-minute track is not a play, but it is
+        // still thirty seconds of listening.
+        let mut listen = listening(Some(600.0));
+        let saved = play_for(&mut listen, 30.0);
+
+        assert!(!listen.became_a_play(), "nowhere near the threshold");
+        assert!((saved - 30.0).abs() < 0.01, "got {saved}");
+    }
+
+    #[test]
+    fn nothing_is_ever_saved_twice() {
+        let mut listen = listening(Some(600.0));
+
+        let first = play_for(&mut listen, 100.0);
+        let second = play_for(&mut listen, 0.0);
+
+        assert!((first - 100.0).abs() < 0.01);
+        assert!(
+            second.abs() < f64::EPSILON,
+            "a flush with nothing banked must write nothing, got {second}"
+        );
+    }
+
+    #[test]
+    fn a_repeated_track_keeps_accumulating() {
+        // Repeat-one restarts playback without a new track, so the same
+        // accumulator keeps running. An hour on one track is an hour.
+        let mut listen = listening(Some(180.0));
+        let mut total = 0.0;
+        for _ in 0..20 {
+            total += play_for(&mut listen, 180.0);
+        }
+
+        assert!((total - 3_600.0).abs() < 0.1, "got {total}");
+    }
+
+    #[test]
+    fn a_normal_track_counts_as_a_play_at_half_way() {
+        let mut listen = listening(Some(200.0));
+        assert!((listen.threshold - 100.0).abs() < f64::EPSILON);
+
+        listen.heard = 99.0;
+        assert!(
+            !listen.became_a_play(),
+            "a skip before half way is not a play"
+        );
+
+        listen.heard = 100.0;
+        assert!(listen.became_a_play());
+    }
+
+    #[test]
+    fn a_long_track_counts_after_four_minutes() {
+        // An hour-long mix should not need thirty minutes to count.
+        let listen = listening(Some(3_600.0));
+        assert!((listen.threshold - PLAY_CEILING_SECS).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_track_with_no_declared_duration_uses_a_flat_bar() {
+        for duration in [None, Some(0.0)] {
+            let listen = listening(duration);
+            assert!(
+                (listen.threshold - PLAY_UNKNOWN_SECS).abs() < f64::EPSILON,
+                "{duration:?} should fall back rather than produce a zero bar"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_length_track_never_counts_by_accident() {
+        // A duration of zero taking a fraction of itself would give a
+        // threshold of zero, which every track clears instantly.
+        let listen = listening(Some(0.0));
+        assert!(listen.threshold > 0.0);
+        assert!(!listen.became_a_play(), "nothing has been heard yet");
+    }
+
+    #[test]
+    fn a_play_is_only_counted_once() {
+        let mut listen = listening(Some(60.0));
+        listen.heard = 40.0;
+        assert!(listen.became_a_play());
+
+        listen.counted = true;
+        listen.heard = 60.0;
+        assert!(
+            !listen.became_a_play(),
+            "holding a finished track must not count it again"
+        );
     }
 }

@@ -121,6 +121,14 @@ pub struct LibraryState {
     /// results that were identical every time.
     tracks_stale: bool,
 
+    /// Bumped whenever anything the statistics are derived from changes.
+    ///
+    /// Deliberately not bumped by search or sorting, which change what is on
+    /// screen without changing a single fact about the library — the Home page
+    /// caches against this, and rebuilding it on every keystroke would undo
+    /// the point of caching it at all.
+    stats_epoch: u64,
+
     /// Set when the browse lists no longer match the library.
     ///
     /// Only the library's *contents* changing, a change of drill-down (albums
@@ -132,6 +140,7 @@ pub struct LibraryState {
 impl LibraryState {
     pub fn new(library: Library, config: &Config) -> Self {
         let mut state = Self {
+            stats_epoch: 0,
             library,
             focus: None,
             search: String::new(),
@@ -286,13 +295,28 @@ impl LibraryState {
         self.library.track(id).ok()?
     }
 
-    /// Note that a track was played, so recency ordering means something.
+    /// Note that a track was played.
     pub fn record_play(&mut self, path: &std::path::Path) {
         let Ok(Some(id)) = self.library.id_for_path(path) else {
             return;
         };
-        if let Err(err) = self.library.record_play(id) {
-            tracing::debug!("could not record a play: {err:#}");
+        match self.library.record_play(id) {
+            Ok(()) => self.stats_epoch = self.stats_epoch.wrapping_add(1),
+            Err(err) => tracing::debug!("could not record a play: {err:#}"),
+        }
+    }
+
+    /// Add to the time a track has been listened to.
+    ///
+    /// Separate from [`record_play`](Self::record_play): a play is decided
+    /// once, listening keeps accruing for as long as the audio runs.
+    pub fn add_listening(&mut self, path: &std::path::Path, seconds: f64) {
+        let Ok(Some(id)) = self.library.id_for_path(path) else {
+            return;
+        };
+        match self.library.add_listening(id, seconds) {
+            Ok(()) => self.stats_epoch = self.stats_epoch.wrapping_add(1),
+            Err(err) => tracing::debug!("could not record listening time: {err:#}"),
         }
     }
 
@@ -378,11 +402,17 @@ impl LibraryState {
     /// Adopt a finished scan and re-run the current query if needed.
     ///
     /// Returns whether anything changed, so the caller can decide to repaint.
+    /// A counter that changes whenever the statistics need recomputing.
+    pub fn stats_epoch(&self) -> u64 {
+        self.stats_epoch
+    }
+
     pub fn update(&mut self) -> bool {
         let mut changed = false;
 
         if self.take_finished_scan() {
             changed = true;
+            self.stats_epoch = self.stats_epoch.wrapping_add(1);
         }
 
         if self.tracks_stale || self.groups_stale {
