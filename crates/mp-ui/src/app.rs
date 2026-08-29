@@ -306,13 +306,22 @@ impl ResonanceApp {
             .is_some_and(|since| since.elapsed() >= SAVE_DEBOUNCE);
 
         if self.dirty && due {
-            self.config.validate();
-            if let Err(err) = self.config.save(&self.paths) {
-                tracing::error!("could not save settings: {err:#}");
-            }
-            self.dirty = false;
-            self.dirty_since = None;
+            self.save_config();
         }
+    }
+
+    /// Write the config now, whatever the debounce says.
+    fn save_config(&mut self) {
+        if !self.dirty {
+            return;
+        }
+
+        self.config.validate();
+        if let Err(err) = self.config.save(&self.paths) {
+            tracing::error!("could not save settings: {err:#}");
+        }
+        self.dirty = false;
+        self.dirty_since = None;
     }
 
     /// Start playing the list currently on screen, from `index`.
@@ -2889,6 +2898,14 @@ impl eframe::App for ResonanceApp {
             ui.ctx().request_repaint();
         }
 
+        // A pending save needs one more frame to happen on. egui stops
+        // painting as soon as the window goes quiet, so without this a setting
+        // changed and then left alone is never written: the debounce elapses
+        // with no frame to notice it.
+        if self.dirty {
+            ui.ctx().request_repaint_after(SAVE_DEBOUNCE);
+        }
+
         // A library appearing is the welcome's job being done, so it steps
         // aside on its own rather than waiting to be dismissed.
         if self.welcome && self.library.stats().tracks > 0 {
@@ -2925,17 +2942,18 @@ impl eframe::App for ResonanceApp {
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
         // eframe's own storage is unused; the TOML config is the source of
-        // truth so settings stay hand-editable.
-        if self.dirty {
-            self.config.validate();
-            if let Err(err) = self.config.save(&self.paths) {
-                tracing::error!("could not save settings on exit: {err:#}");
-            }
-            self.dirty = false;
-        }
+        // truth so settings stay hand-editable. Kept as a second chance rather
+        // than the only one, because eframe persistence is switched off here
+        // and this hook is not guaranteed to run.
+        self.save_config();
     }
 
     fn on_exit(&mut self) {
+        // Settings are written here rather than left to eframe's `save`: this
+        // app turns eframe persistence off, so that hook is not something to
+        // rely on. Anything still pending would otherwise be lost on close.
+        self.save_config();
+
         // Bank the tail of whatever was playing before the process goes away.
         self.player
             .flush_listening(&mut self.library, self.config.privacy.track_play_history);

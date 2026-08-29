@@ -453,6 +453,21 @@ struct Worker {
     queue_revision: u64,
 }
 
+/// Whether a track is close enough to its end to start fading out.
+///
+/// `decoded` counts device frames *produced*, not played. Decoding runs up to
+/// a ring ahead of the speakers, so timing a fade from the playback position
+/// would attenuate audio that left the buffer seconds earlier — the fade would
+/// land late, or on a track that had already finished.
+fn crossfade_due(duration_secs: f64, decoded: u64, rate: f64, crossfade_secs: f32) -> bool {
+    if crossfade_secs <= 0.0 || rate <= 0.0 || !duration_secs.is_finite() || duration_secs <= 0.0 {
+        return false;
+    }
+
+    let produced = decoded as f64 / rate;
+    duration_secs - produced <= f64::from(crossfade_secs)
+}
+
 /// The outgoing track during a crossfade.
 ///
 /// Kept whole — decoder, resampler and the samples already pulled out of it —
@@ -1176,10 +1191,12 @@ impl Worker {
         };
 
         let rate = f64::from(self.shared.device_rate().max(1));
-        let produced = self.decoded_frames as f64 / rate;
-        let left = duration.as_secs_f64() - produced;
-
-        if left > f64::from(self.crossfade_secs) {
+        if !crossfade_due(
+            duration.as_secs_f64(),
+            self.decoded_frames,
+            rate,
+            self.crossfade_secs,
+        ) {
             return;
         }
 
@@ -1559,6 +1576,65 @@ mod tests {
         // 64 samples of a 2-channel stream is 32 frames.
         assert_eq!(shared.pushed_frames(), 32);
         assert_eq!(carry.len(), 136);
+    }
+
+    #[test]
+    fn a_fade_is_due_only_near_the_end_of_the_track() {
+        // A four minute track at 96 kHz with a four second fade.
+        let rate = 96_000.0;
+        let duration = 240.0;
+
+        let at = |secs: f64| (secs * rate) as u64;
+
+        assert!(!crossfade_due(duration, at(0.0), rate, 4.0), "at the start");
+        assert!(!crossfade_due(duration, at(200.0), rate, 4.0), "mid track");
+        assert!(
+            !crossfade_due(duration, at(235.9), rate, 4.0),
+            "a tenth of a second too early"
+        );
+        assert!(crossfade_due(duration, at(236.0), rate, 4.0), "four left");
+        assert!(crossfade_due(duration, at(239.0), rate, 4.0), "one left");
+    }
+
+    #[test]
+    fn a_longer_fade_starts_earlier() {
+        let rate = 48_000.0;
+        let decoded = (100.0 * rate) as u64;
+
+        assert!(!crossfade_due(120.0, decoded, rate, 4.0), "twenty left");
+        assert!(crossfade_due(120.0, decoded, rate, 20.0));
+    }
+
+    #[test]
+    fn no_fade_is_due_when_crossfade_is_switched_off() {
+        // Zero seconds is how the setting is turned off, and it must not read
+        // as "always due" through the subtraction.
+        let rate = 48_000.0;
+        assert!(!crossfade_due(120.0, (119.9 * rate) as u64, rate, 0.0));
+    }
+
+    #[test]
+    fn a_track_of_unknown_length_never_triggers_a_fade() {
+        // A fade has to be scheduled against the end of the track; a container
+        // that will not say how long it is cannot be scheduled against.
+        let rate = 48_000.0;
+        assert!(!crossfade_due(0.0, 0, rate, 4.0));
+        assert!(!crossfade_due(f64::NAN, 0, rate, 4.0));
+        assert!(!crossfade_due(f64::INFINITY, 0, rate, 4.0));
+    }
+
+    #[test]
+    fn a_track_shorter_than_the_fade_is_due_immediately() {
+        // A two second track with a four second fade: there is no point in the
+        // track that is not inside the fade, so it starts at once rather than
+        // never.
+        let rate = 48_000.0;
+        assert!(crossfade_due(2.0, 0, rate, 4.0));
+    }
+
+    #[test]
+    fn a_nonsense_sample_rate_does_not_divide_by_zero() {
+        assert!(!crossfade_due(120.0, 1000, 0.0, 4.0));
     }
 
     /// An outgoing stream with nothing left to decode.
