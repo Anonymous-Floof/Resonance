@@ -2549,7 +2549,10 @@ impl ResonanceApp {
             &summary,
             analysis,
             &history,
-            self.player.sleep(),
+            views::settings::Live {
+                sleep: self.player.sleep(),
+                fades: self.player.fades(),
+            },
         );
 
         if let Some(choice) = outcome.set_sleep {

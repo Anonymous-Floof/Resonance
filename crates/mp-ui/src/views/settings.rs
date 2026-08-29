@@ -32,6 +32,17 @@ impl Changed {
 /// window splits the difference rather than starving the label entirely.
 const CONTROL_WIDTH_UNITS: f32 = 24.0;
 
+/// Live playback state the settings screen reports but does not own.
+///
+/// Grouped rather than passed loose because both are transient facts about the
+/// engine rather than settings, and the two read identically at the call site.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Live {
+    pub sleep: Option<crate::player::Sleep>,
+    /// Crossfades begun this session.
+    pub fades: u64,
+}
+
 /// Actions the settings view cannot perform itself.
 #[derive(Debug, Default)]
 pub struct SettingsOutcome {
@@ -74,7 +85,7 @@ pub fn show(
     font_summary: &str,
     analysis: Option<crate::analysis_job::Status>,
     tag_history: &[mp_core::library::TagEdit],
-    sleep: Option<crate::player::Sleep>,
+    live: Live,
 ) -> SettingsOutcome {
     let mut out = SettingsOutcome::default();
     let m = &theme.metrics;
@@ -98,7 +109,7 @@ pub fn show(
             );
 
             appearance_section(ui, theme, config, font_summary, &mut out);
-            playback_section(ui, theme, config, sleep, &mut out);
+            playback_section(ui, theme, config, live, &mut out);
             output_section(ui, theme, config, &mut out);
             library_section(ui, theme, config, analysis, &mut out);
             tag_history_section(ui, theme, config, tag_history, &mut out);
@@ -258,11 +269,11 @@ fn playback_section(
     ui: &mut Ui,
     theme: &Theme,
     config: &mut Config,
-    sleep: Option<crate::player::Sleep>,
+    live: Live,
     out: &mut SettingsOutcome,
 ) {
     section(ui, theme, "Playback", |ui| {
-        sleep_row(ui, theme, sleep, out);
+        sleep_row(ui, theme, live.sleep, out);
         let p = &mut config.playback;
 
         row(ui, theme, "Shuffle", "How the next track is chosen", |ui| {
@@ -315,6 +326,16 @@ fn playback_section(
         .apply(out);
 
         if config.playback.crossfade_seconds > 0.0 {
+            note(
+                ui,
+                theme,
+                &format!(
+                    "{} crossfade{} so far this session. Fades happen at the                      end of a track, not when you press skip.",
+                    live.fades,
+                    if live.fades == 1 { "" } else { "s" }
+                ),
+            );
+
             let p = &mut config.playback;
             row(
                 ui,

@@ -77,6 +77,8 @@ pub struct Shared {
 
     /// Buffer underruns, surfaced in the debug overlay. Should stay at zero.
     xruns: AtomicU64,
+    /// Crossfades begun, for diagnostics.
+    fades: AtomicU64,
 
     /// Samples the worker produced but could not fit into the ring.
     ///
@@ -115,6 +117,7 @@ impl Shared {
             priming: AtomicBool::new(true),
             limiting: AtomicBool::new(false),
             xruns: AtomicU64::new(0),
+            fades: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             flush_request: AtomicU64::new(0),
             flush_ack: AtomicU64::new(0),
@@ -276,6 +279,15 @@ impl Shared {
     }
 
     // -- diagnostics -------------------------------------------------------
+
+    /// How many crossfades have started this session.
+    pub fn fades(&self) -> u64 {
+        self.fades.load(Ordering::Relaxed)
+    }
+
+    pub fn note_fade_started(&self) {
+        self.fades.fetch_add(1, Ordering::Relaxed);
+    }
 
     pub fn xruns(&self) -> u64 {
         self.xruns.load(Ordering::Relaxed)

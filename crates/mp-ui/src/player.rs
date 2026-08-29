@@ -464,6 +464,15 @@ impl Player {
     }
 
     /// Underrun count, for the debug overlay.
+    /// Crossfades begun this session.
+    ///
+    /// Surfaced in Settings because a fade is otherwise unfalsifiable: "that
+    /// sounded like a hard cut" and "no fade was attempted" are the same
+    /// observation to a listener, and they need completely different fixes.
+    pub fn fades(&self) -> u64 {
+        self.engine.as_ref().map_or(0, AudioEngine::fades)
+    }
+
     pub fn xruns(&self) -> u64 {
         self.engine.as_ref().map_or(0, AudioEngine::xruns)
     }

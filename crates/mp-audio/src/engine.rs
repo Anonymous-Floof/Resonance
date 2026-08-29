@@ -276,6 +276,11 @@ impl AudioEngine {
         self.shared.xruns()
     }
 
+    /// How many crossfades have begun this session.
+    pub fn fades(&self) -> u64 {
+        self.shared.fades()
+    }
+
     pub fn dropped(&self) -> u64 {
         self.shared.dropped()
     }
@@ -563,6 +568,13 @@ impl Default for EqSettings {
 
 impl Worker {
     fn run(mut self) {
+        tracing::info!(
+            "audio worker starting: crossfade {:.1}s, gapless {}, trim silence {}",
+            self.crossfade_secs,
+            self.gapless,
+            self.trim_silence
+        );
+
         if let Err(err) = self.start_stream() {
             tracing::error!("could not start the audio output: {err:#}");
             return;
@@ -885,6 +897,14 @@ impl Worker {
             Command::SetCrossfade { seconds, curve } => {
                 self.crossfade_secs = seconds.max(0.0);
                 self.crossfade_curve = curve;
+                // Logged at info because "is crossfade actually on in the
+                // engine" is the first question when someone reports that it
+                // does nothing, and it cannot be answered from the outside.
+                tracing::info!(
+                    "crossfade set to {:.1}s ({:?})",
+                    self.crossfade_secs,
+                    self.crossfade_curve
+                );
                 // A fade already running is left to finish on the settings it
                 // started with; changing the curve underneath it would step
                 // the gain.
@@ -1211,6 +1231,12 @@ impl Worker {
         self.fading = Some(Fading::new(decoder, resampler));
 
         if self.open_next_gaplessly() {
+            self.shared.note_fade_started();
+            tracing::debug!(
+                "crossfade: {:.1}s over {:.1}s of track",
+                self.crossfade_secs,
+                duration.as_secs_f64()
+            );
             let total = (f64::from(self.crossfade_secs) * rate) as u64;
             self.fade = Fade {
                 frame: 0,
@@ -1425,6 +1451,12 @@ impl Worker {
         let frames = (target.as_secs_f64() * f64::from(self.shared.device_rate())) as u64;
         self.shared.set_position_frames(frames);
         self.shared.set_pushed_frames(frames);
+
+        // The crossfade schedule is measured from here too. Left alone, a seek
+        // forward would leave the engine believing it was still near the start
+        // of the track and the fade would never come due; a seek back would
+        // bring it due immediately.
+        self.decoded_frames = frames;
         self.shared.set_end_of_track(false);
     }
 
