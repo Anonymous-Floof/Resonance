@@ -222,7 +222,10 @@ impl Default for Playback {
         Self {
             shuffle: ShuffleMode::Off,
             repeat: RepeatMode::Off,
-            volume: 0.7,
+            // Deliberately quiet. A player that opens at 70% is the one
+            // that makes someone lunge for the volume key the first time they
+            // press play, and turning it up is a cheaper mistake to fix.
+            volume: 0.41,
             muted: false,
             gapless: true,
             crossfade_seconds: 0.0,
@@ -317,23 +320,29 @@ impl Default for Library {
             watched_folders: Vec::new(),
             scan_on_startup: true,
             watch_for_changes: true,
-            default_grouping: Grouping::Songs,
+            // Artists rather than a flat song list: a collection large
+            // enough to need a player is one where an unbroken A-to-Z of every
+            // track is the least useful thing to open on.
+            default_grouping: Grouping::Artists,
             default_sort: SortKey::Title,
             sort_descending: false,
             ignore_leading_articles: true,
             min_track_seconds: 5,
+            // Sorted, because `validate` sorts them: an unsorted list here
+            // would mean the defaults change the first time they are loaded.
             extensions: [
-                "mp3", "flac", "wav", "m4a", "aac", "ogg", "oga", "opus", "wma", "aiff", "aif",
-                "alac", "ape", "wv", "mp4",
+                "aac", "aif", "aiff", "alac", "ape", "flac", "m4a", "mp3", "mp4", "oga", "ogg",
+                "opus", "wav", "wma", "wv",
             ]
             .iter()
             .map(|s| (*s).to_owned())
             .collect(),
             allow_tag_editing: false,
-            // False, because this now genuinely decodes every track in the
-            // background. It defaulted to true while it did nothing, which
-            // meant the checkbox sat ticked and claimed something untrue.
-            analyze_audio_features: false,
+            // On, because the similar-tracks and auto-radio features are
+            // inert without it. It genuinely decodes every track in the
+            // background on first run, which is the cost of those features
+            // working at all rather than sitting there greyed out.
+            analyze_audio_features: true,
         }
     }
 }
@@ -363,12 +372,15 @@ impl Equalizer {
 
 impl Default for Equalizer {
     fn default() -> Self {
+        // The "Rock" preset from `mp_audio::dsp::presets`, which cannot be
+        // named from here: `mp-audio` depends on this crate, not the other way
+        // round. A test over there asserts the two still agree.
         Self {
-            enabled: false,
-            gains_db: vec![0.0; EQ_BAND_COUNT],
-            preamp_db: 0.0,
+            enabled: true,
+            gains_db: vec![4.0, 3.0, 1.0, -0.5, -1.5, 0.0, 1.5, 3.0, 3.5, 3.0],
+            preamp_db: -4.5,
             limiter: true,
-            preset: Some("Flat".to_owned()),
+            preset: Some("Rock".to_owned()),
         }
     }
 }
@@ -418,8 +430,8 @@ pub struct Visualizer {
 impl Default for Visualizer {
     fn default() -> Self {
         Self {
-            kind: VisualizerKind::SpectrumBars,
-            color_mode: VizColorMode::Accent,
+            kind: VisualizerKind::AuroraBloom,
+            color_mode: VizColorMode::AlbumArt,
             custom_color: "#7C5CFF".to_owned(),
             sensitivity: 1.0,
             smoothing: 0.72,
@@ -486,9 +498,11 @@ pub struct Window {
 impl Default for Window {
     fn default() -> Self {
         Self {
-            width: 1280.0,
-            height: 820.0,
-            maximized: false,
+            // The size the window restores to when it is un-maximised, so
+            // it wants to be comfortable rather than minimal.
+            width: 1500.0,
+            height: 900.0,
+            maximized: true,
             nav_collapsed: false,
             queue_panel_open: true,
         }
@@ -651,6 +665,33 @@ mod tests {
         assert_eq!(parsed.equalizer.gains_db.len(), EQ_BAND_COUNT);
         assert_eq!(parsed.appearance.accent, original.appearance.accent);
         assert_eq!(parsed.playback.volume, original.playback.volume);
+    }
+
+    #[test]
+    fn the_shipped_defaults_name_nobody_in_particular() {
+        // The defaults were lifted from a real configuration, which is a good
+        // way to get sensible values and a very good way to accidentally ship
+        // somebody's home directory. Everything machine-specific has to stay
+        // empty.
+        let config = Config::default();
+        assert!(
+            config.library.watched_folders.is_empty(),
+            "a watched folder was baked into the defaults: {:?}",
+            config.library.watched_folders
+        );
+        assert!(config.playback.output_device.is_none());
+        assert!(config.playback.buffer_frames.is_none());
+    }
+
+    #[test]
+    fn the_shipped_defaults_survive_validation_unchanged() {
+        // A default outside its own clamp would be silently rewritten on first
+        // load, which makes the value in the source a lie.
+        let mut config = Config::default();
+        let before = config.to_toml().expect("serialising defaults");
+        config.validate();
+        let after = config.to_toml().expect("serialising validated defaults");
+        assert_eq!(before, after);
     }
 
     #[test]

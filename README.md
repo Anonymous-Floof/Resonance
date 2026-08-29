@@ -121,6 +121,14 @@ only opens files that actually changed.
 
 You can add more folders later in **Settings → Library**.
 
+Resonance opens with a set of defaults that are meant to be usable rather than
+neutral: a fairly quiet starting volume, the Rock equalizer curve on, the aurora
+visualiser taking its colours from album art, and the library grouped by artist.
+Background audio analysis is on as well, which is what makes similar tracks and
+auto-radio work — it decodes each track once, in the background, and you can
+turn it off in **Settings → Library** if you would rather it did not. All of it
+is in **Settings**, and none of it is load-bearing.
+
 ## Portable mode
 
 Portable mode makes Resonance leave *nothing* on the host machine, so the whole
@@ -286,7 +294,7 @@ rebuild the DSP.
 ## Tests
 
 ```bash
-cargo test --workspace          # 633 tests
+cargo test --workspace          # 706 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```

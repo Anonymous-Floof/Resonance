@@ -206,6 +206,28 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_default_equalizer_is_a_real_preset() {
+        // `mp-core` has to spell the default curve out as literals, because it
+        // sits below this crate and cannot name `ROCK`. That is a duplicated
+        // constant, and duplicated constants drift; this is the thing that
+        // notices. Without it, editing a preset here would leave every new
+        // install with a curve labelled "Rock" that is not Rock.
+        let default = mp_core::config::Equalizer::default();
+        let named = default.preset.as_deref().expect("a named default preset");
+        let preset = ALL
+            .iter()
+            .find(|p| p.name == named)
+            .unwrap_or_else(|| panic!("default preset {named:?} is not a built-in"));
+
+        assert_eq!(
+            default.gains_db.as_slice(),
+            preset.gains_db.as_slice(),
+            "the default gains no longer match the {named} preset"
+        );
+        assert_eq!(default.preamp_db, preset.preamp_db);
+    }
+
+    #[test]
     fn presets_have_distinct_names_and_curves() {
         for (index, preset) in ALL.iter().enumerate() {
             for other in &ALL[index + 1..] {
