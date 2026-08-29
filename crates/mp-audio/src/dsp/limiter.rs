@@ -169,11 +169,6 @@ impl Limiter {
         self.gain
     }
 
-    /// Total frames the limiter has had to act on this session.
-    pub fn reduced_frames(&self) -> u64 {
-        self.reduced_frames
-    }
-
     /// Release the limiter immediately. Used on seek and track change, where
     /// holding reduction from the previous audio would duck the new start.
     pub fn reset(&mut self) {

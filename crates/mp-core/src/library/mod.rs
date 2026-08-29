@@ -238,11 +238,6 @@ impl Library {
         &self.cache
     }
 
-    /// Whether this library will survive a restart.
-    pub fn is_persistent(&self) -> bool {
-        matches!(self.source, Source::File(_))
-    }
-
     // -- scanning ----------------------------------------------------------
 
     /// A scanner that can be moved to another thread.
@@ -826,11 +821,6 @@ impl Library {
         duplicates::find(&self.connection, tolerance)
     }
 
-    /// How many tracks have been analysed, out of how many there are.
-    pub fn analysis_progress(&self) -> Result<(u32, u32)> {
-        features::progress(&self.connection)
-    }
-
     // -- maintenance -------------------------------------------------------
 
     /// Delete cached covers nothing refers to any more.
@@ -895,11 +885,6 @@ impl Library {
         self.connection
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
             .context("checkpointing the library index")?;
-        Ok(())
-    }
-
-    pub fn vacuum(&self) -> Result<()> {
-        self.connection.execute_batch("VACUUM")?;
         Ok(())
     }
 }

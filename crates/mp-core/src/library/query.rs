@@ -7,7 +7,7 @@
 //! rather than in the UI once per frame.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -392,16 +392,6 @@ pub fn paths(
         .into_iter()
         .map(|track| track.path)
         .collect())
-}
-
-/// Whether a path is in the index at all.
-pub fn contains_path(connection: &Connection, path: &Path) -> Result<bool> {
-    let count: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM tracks WHERE path = ?1",
-        params![path.to_string_lossy()],
-        |row| row.get(0),
-    )?;
-    Ok(count > 0)
 }
 
 #[cfg(test)]

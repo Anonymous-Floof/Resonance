@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use mp_core::config::Config;
 use mp_core::library::{
@@ -121,6 +122,11 @@ pub struct LibraryState {
     /// results that were identical every time.
     tracks_stale: bool,
 
+    /// When the watched folders were last polled for changes.
+    last_watch_check: Option<Instant>,
+    /// Whether the watch has had its first tick, which only starts the clock.
+    watch_started: bool,
+
     /// Bumped whenever anything the statistics are derived from changes.
     ///
     /// Deliberately not bumped by search or sorting, which change what is on
@@ -141,6 +147,8 @@ impl LibraryState {
     pub fn new(library: Library, config: &Config) -> Self {
         let mut state = Self {
             stats_epoch: 0,
+            last_watch_check: None,
+            watch_started: false,
             library,
             focus: None,
             search: String::new(),
@@ -190,10 +198,6 @@ impl LibraryState {
 
     pub fn focus(&self) -> Option<&Focus> {
         self.focus.as_ref()
-    }
-
-    pub fn search_text(&self) -> &str {
-        &self.search
     }
 
     pub fn is_searching(&self) -> bool {
@@ -329,6 +333,42 @@ impl LibraryState {
     /// Progress of the running scan, if there is one.
     pub fn scan_progress(&self) -> Option<&Progress> {
         self.scan.as_ref().map(|job| job.progress.as_ref())
+    }
+
+    /// How often a watched library is re-checked for changes.
+    ///
+    /// Polled rather than subscribed to. A rescan only reads files whose size
+    /// or mtime has moved, so an unchanged library costs a directory walk and
+    /// nothing else — cheaper than the dependency and the per-platform
+    /// behaviour a real filesystem watcher brings with it. The cost of that
+    /// choice is latency: a file added now shows up within this interval
+    /// rather than instantly.
+    pub const WATCH_INTERVAL: Duration = Duration::from_secs(45);
+
+    /// Rescan a watched library if it is due.
+    ///
+    /// Does nothing while a scan is already running, while the setting is off,
+    /// or before the interval has elapsed, so it is safe to call every frame.
+    pub fn poll_watched(&mut self, config: &Config, now: Instant) {
+        if !config.library.watch_for_changes || self.scan.is_some() {
+            return;
+        }
+
+        if let Some(last) = self.last_watch_check
+            && now.duration_since(last) < Self::WATCH_INTERVAL
+        {
+            return;
+        }
+
+        self.last_watch_check = Some(now);
+
+        // The very first call only starts the clock. Startup already scans, and
+        // scanning twice in the first second helps nobody.
+        if self.watch_started {
+            self.start_scan(config);
+        } else {
+            self.watch_started = true;
+        }
     }
 
     /// Start a scan on a background thread.

@@ -16,6 +16,7 @@
 
 pub mod biquad;
 pub mod chain;
+pub mod crossfade;
 pub mod eq;
 pub mod limiter;
 pub mod presets;

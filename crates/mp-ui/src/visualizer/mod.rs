@@ -333,10 +333,6 @@ impl Paint {
             ),
         }
     }
-
-    pub fn ground(&self) -> Rgb {
-        self.ground
-    }
 }
 
 /// How far apart two ramp colours have to be, in Oklab.

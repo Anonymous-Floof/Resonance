@@ -39,10 +39,8 @@ pub enum Icon {
     // General
     Search,
     Plus,
-    Heart,
     ChevronLeft,
     ChevronRight,
-    Menu,
     /// Enter the full-screen now-playing view.
     Expand,
     /// Leave it again.
@@ -87,10 +85,8 @@ impl Icon {
             Self::Visualizer => "Visualizer",
             Self::Search => "Search",
             Self::Plus => "Add",
-            Self::Heart => "Favourite",
             Self::ChevronLeft => "Back",
             Self::ChevronRight => "Forward",
-            Self::Menu => "Menu",
             Self::Expand => "Full screen",
             Self::Collapse => "Leave full screen",
             Self::Lyrics => "Lyrics",
@@ -139,10 +135,8 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, thickness
 
         Icon::Search => search(painter, box_rect, stroke),
         Icon::Plus => plus(painter, box_rect, stroke),
-        Icon::Heart => heart(painter, box_rect, stroke),
         Icon::ChevronLeft => chevron(painter, box_rect, stroke, true),
         Icon::ChevronRight => chevron(painter, box_rect, stroke, false),
-        Icon::Menu => menu(painter, box_rect, stroke),
         Icon::Expand => corners(painter, box_rect, stroke, true),
         Icon::Collapse => corners(painter, box_rect, stroke, false),
         Icon::Lyrics => lyrics(painter, box_rect, stroke),
@@ -464,34 +458,9 @@ fn plus(painter: &Painter, r: Rect, stroke: Stroke) {
     path(painter, r, &[(0.14, 0.5), (0.86, 0.5)], stroke);
 }
 
-fn heart(painter: &Painter, r: Rect, stroke: Stroke) {
-    path(
-        painter,
-        r,
-        &[
-            (0.5, 0.86),
-            (0.12, 0.5),
-            (0.12, 0.3),
-            (0.3, 0.16),
-            (0.5, 0.32),
-            (0.7, 0.16),
-            (0.88, 0.3),
-            (0.88, 0.5),
-            (0.5, 0.86),
-        ],
-        stroke,
-    );
-}
-
 fn chevron(painter: &Painter, r: Rect, stroke: Stroke, left: bool) {
     let (near, far) = if left { (0.34, 0.66) } else { (0.66, 0.34) };
     path(painter, r, &[(far, 0.16), (near, 0.5), (far, 0.84)], stroke);
-}
-
-fn menu(painter: &Painter, r: Rect, stroke: Stroke) {
-    for y in [0.26, 0.5, 0.74] {
-        path(painter, r, &[(0.14, y), (0.86, y)], stroke);
-    }
 }
 
 /// Bars of decreasing length beside an arrow, the way sort controls are drawn
@@ -647,10 +616,8 @@ mod tests {
             Icon::Visualizer,
             Icon::Search,
             Icon::Plus,
-            Icon::Heart,
             Icon::ChevronLeft,
             Icon::ChevronRight,
-            Icon::Menu,
             Icon::Minimize,
             Icon::Maximize,
             Icon::Restore,

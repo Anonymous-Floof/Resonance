@@ -185,9 +185,10 @@ impl ResonanceApp {
 
         Self {
             nav_collapsed: config.window.nav_collapsed,
-            // Land on the track list: with a library present it is immediately
-            // useful, and without one it explains how to add a folder.
-            view: View::Songs,
+            // Whichever section the user asked to open on. With a library
+            // present it is immediately useful, and without one it explains
+            // how to add a folder.
+            view: View::for_grouping(config.library.default_grouping),
             search: String::new(),
             paths,
             config,
@@ -2539,10 +2540,24 @@ impl ResonanceApp {
             &summary,
             analysis,
             &history,
+            self.player.sleep(),
         );
+
+        if let Some(choice) = outcome.set_sleep {
+            self.player.set_sleep(choice);
+        }
 
         if let Some(record) = outcome.undo_tag_edit {
             self.undo_tag_edit(record);
+        }
+
+        if outcome.reopen_device {
+            // Applied immediately rather than on the next launch: a device
+            // picker you have to restart the app to test is not a picker.
+            self.player.reopen_device(
+                self.config.playback.output_device.clone(),
+                self.config.playback.buffer_frames,
+            );
         }
 
         if outcome.export_bundle {
@@ -2798,6 +2813,7 @@ impl eframe::App for ResonanceApp {
         self.last_frame = now;
 
         self.artwork.begin_frame();
+        self.library.poll_watched(&self.config, now);
         let library_changed = self.library.update();
         if library_changed {
             self.announce_scan();
@@ -2853,10 +2869,21 @@ impl eframe::App for ResonanceApp {
             // rate rather than an occasional nudge.
             ui.ctx()
                 .request_repaint_after(Duration::from_secs_f32(self.viz_interval(ui.ctx())));
-        } else if self.player.is_playing() || !self.player.notices.is_empty() {
+        } else if self.player.is_playing()
+            || !self.player.notices.is_empty()
+            // An armed sleep timer counts down in `update`, which only runs on
+            // a frame. Without this it would stall the moment playback was
+            // paused and never fire.
+            || self.player.sleep().is_some()
+        {
             ui.ctx().request_repaint_after(Duration::from_millis(50));
         } else if self.library.is_scanning() {
             ui.ctx().request_repaint_after(Duration::from_millis(150));
+        } else if self.config.library.watch_for_changes {
+            // An idle window is not repainted, so the watch would never tick.
+            // Asked for at the poll interval rather than at a frame rate: this
+            // exists to wake up occasionally, not to animate.
+            ui.ctx().request_repaint_after(LibraryState::WATCH_INTERVAL);
         }
         if self.artwork.wants_repaint() {
             ui.ctx().request_repaint();

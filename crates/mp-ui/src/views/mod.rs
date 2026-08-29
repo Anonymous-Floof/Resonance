@@ -13,6 +13,20 @@ pub mod visualizer;
 pub mod welcome;
 
 use crate::widgets::icons::Icon;
+use mp_core::config::Grouping;
+
+impl View {
+    /// The section named by the "Open on" setting.
+    pub fn for_grouping(grouping: Grouping) -> Self {
+        match grouping {
+            Grouping::Songs => Self::Songs,
+            Grouping::Artists => Self::Artists,
+            Grouping::Albums => Self::Albums,
+            Grouping::Genres => Self::Genres,
+            Grouping::Folders => Self::Folders,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum View {

@@ -289,10 +289,6 @@ impl Shared {
         self.dropped.load(Ordering::Relaxed)
     }
 
-    pub fn note_dropped(&self, samples: u64) {
-        self.dropped.fetch_add(samples, Ordering::Relaxed);
-    }
-
     // -- flush handshake ---------------------------------------------------
 
     /// Ask the callback to discard everything currently queued.

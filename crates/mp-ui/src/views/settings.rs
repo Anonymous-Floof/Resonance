@@ -51,6 +51,20 @@ pub struct SettingsOutcome {
     pub import_bundle_replace: bool,
     /// Load an `.mpbundle`, keeping settings and adding only what is missing.
     pub import_bundle_merge: bool,
+
+    /// The sleep timer was changed. `Some(None)` cancels it.
+    ///
+    /// Nested because "the user did not touch it" and "the user turned it off"
+    /// are different, and only the second should disturb a running timer.
+    pub set_sleep: Option<Option<crate::player::Sleep>>,
+
+    /// The output device or buffer size changed; the stream has to be
+    /// reopened for it to take effect.
+    ///
+    /// Separate from `changed`, which only means "save the config". Reopening
+    /// the device interrupts playback, so it happens when the user actually
+    /// picks something rather than on every keystroke elsewhere in Settings.
+    pub reopen_device: bool,
 }
 
 pub fn show(
@@ -60,6 +74,7 @@ pub fn show(
     font_summary: &str,
     analysis: Option<crate::analysis_job::Status>,
     tag_history: &[mp_core::library::TagEdit],
+    sleep: Option<crate::player::Sleep>,
 ) -> SettingsOutcome {
     let mut out = SettingsOutcome::default();
     let m = &theme.metrics;
@@ -83,7 +98,8 @@ pub fn show(
             );
 
             appearance_section(ui, theme, config, font_summary, &mut out);
-            playback_section(ui, theme, config, &mut out);
+            playback_section(ui, theme, config, sleep, &mut out);
+            output_section(ui, theme, config, &mut out);
             library_section(ui, theme, config, analysis, &mut out);
             tag_history_section(ui, theme, config, tag_history, &mut out);
             visualizer_section(ui, theme, config, &mut out);
@@ -235,8 +251,18 @@ fn appearance_section(
     });
 }
 
-fn playback_section(ui: &mut Ui, theme: &Theme, config: &mut Config, out: &mut SettingsOutcome) {
+/// Sleep timer lengths offered, in minutes.
+const SLEEP_CHOICES: &[u32] = &[15, 30, 45, 60, 90, 120];
+
+fn playback_section(
+    ui: &mut Ui,
+    theme: &Theme,
+    config: &mut Config,
+    sleep: Option<crate::player::Sleep>,
+    out: &mut SettingsOutcome,
+) {
     section(ui, theme, "Playback", |ui| {
+        sleep_row(ui, theme, sleep, out);
         let p = &mut config.playback;
 
         row(ui, theme, "Shuffle", "How the next track is chosen", |ui| {
@@ -423,6 +449,164 @@ fn playback_section(ui: &mut Ui, theme: &Theme, config: &mut Config, out: &mut S
     });
 }
 
+/// The sleep timer: transient, so it is state rather than a saved setting.
+fn sleep_row(
+    ui: &mut Ui,
+    theme: &Theme,
+    sleep: Option<crate::player::Sleep>,
+    out: &mut SettingsOutcome,
+) {
+    use crate::player::Sleep;
+
+    let label = match sleep {
+        None => "Off".to_owned(),
+        Some(Sleep::EndOfTrack) => "End of track".to_owned(),
+        Some(Sleep::In(secs)) => {
+            // Rounded up, so a timer with forty seconds left reads "1 min"
+            // rather than counting down through a zero that has not arrived.
+            let minutes = (secs / 60.0).ceil() as u32;
+            format!("{minutes} min left")
+        }
+    };
+
+    row(
+        ui,
+        theme,
+        "Sleep timer",
+        "Stop playing after a while",
+        |ui| {
+            let mut picked = None;
+
+            egui::ComboBox::from_id_salt("sleep_timer")
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(sleep.is_none(), "Off").clicked() {
+                        picked = Some(None);
+                    }
+                    if ui
+                        .selectable_label(sleep == Some(Sleep::EndOfTrack), "End of track")
+                        .clicked()
+                    {
+                        picked = Some(Some(Sleep::EndOfTrack));
+                    }
+                    for &minutes in SLEEP_CHOICES {
+                        if ui
+                            .selectable_label(false, format!("{minutes} minutes"))
+                            .clicked()
+                        {
+                            picked = Some(Some(Sleep::In(f64::from(minutes) * 60.0)));
+                        }
+                    }
+                });
+
+            if let Some(choice) = picked {
+                out.set_sleep = Some(choice);
+                return true;
+            }
+            false
+        },
+    );
+}
+
+/// Buffer sizes offered, in frames.
+///
+/// A short buffer responds faster and costs more CPU; a long one is the
+/// opposite and is what fixes crackling on a busy machine. Automatic lets the
+/// backend choose, which is right until it is not.
+const BUFFER_CHOICES: &[u32] = &[128, 256, 512, 1024, 2048, 4096];
+
+fn output_section(ui: &mut Ui, theme: &Theme, config: &mut Config, out: &mut SettingsOutcome) {
+    section(ui, theme, "Output", |ui| {
+        let devices = mp_audio::device::list_outputs();
+
+        let picked = row(ui, theme, "Device", "Where audio is sent", |ui| {
+            let mut changed = false;
+            let p = &mut config.playback;
+
+            let selected = p
+                .output_device
+                .clone()
+                .unwrap_or_else(|| "System default".to_owned());
+
+            egui::ComboBox::from_id_salt("output_device")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    changed |= ui
+                        .selectable_value(&mut p.output_device, None, "System default")
+                        .changed();
+
+                    for device in &devices {
+                        let label = if device.is_default {
+                            format!("{} (default)", device.name)
+                        } else {
+                            device.name.clone()
+                        };
+                        changed |= ui
+                            .selectable_value(
+                                &mut p.output_device,
+                                Some(device.name.clone()),
+                                label,
+                            )
+                            .changed();
+                    }
+                });
+            changed
+        });
+        out.reopen_device |= picked.0;
+        picked.apply(out);
+
+        // A device that has been unplugged since it was chosen is still in the
+        // config and still what the app is trying to open. Saying so is more
+        // use than silently falling back and leaving the picker looking right.
+        if let Some(name) = &config.playback.output_device
+            && !devices.iter().any(|d| &d.name == name)
+        {
+            note(ui, theme, "That device is not available right now.");
+        }
+
+        let sized = row(
+            ui,
+            theme,
+            "Buffer size",
+            "Larger buffers cost latency but survive a busy machine",
+            |ui| {
+                let mut changed = false;
+                let p = &mut config.playback;
+
+                let selected = match p.buffer_frames {
+                    Some(frames) => format!("{frames} frames"),
+                    None => "Automatic".to_owned(),
+                };
+
+                egui::ComboBox::from_id_salt("buffer_frames")
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        changed |= ui
+                            .selectable_value(&mut p.buffer_frames, None, "Automatic")
+                            .changed();
+
+                        for &frames in BUFFER_CHOICES {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut p.buffer_frames,
+                                    Some(frames),
+                                    format!("{frames} frames"),
+                                )
+                                .changed();
+                        }
+                    });
+                changed
+            },
+        );
+        out.reopen_device |= sized.0;
+        sized.apply(out);
+
+        if devices.is_empty() {
+            note(ui, theme, "No output devices were found.");
+        }
+    });
+}
+
 fn library_section(
     ui: &mut Ui,
     theme: &Theme,
@@ -480,26 +664,31 @@ fn library_section(
         ui.add_space(m.space(1.5));
         let l = &mut config.library;
 
-        row(ui, theme, "Group by", "Default library grouping", |ui| {
-            let mut changed = false;
-            egui::ComboBox::from_id_salt("grouping")
-                .selected_text(grouping_label(l.default_grouping))
-                .show_ui(ui, |ui| {
-                    for g in [
-                        Grouping::Artist,
-                        Grouping::AlbumArtist,
-                        Grouping::Album,
-                        Grouping::Genre,
-                        Grouping::Year,
-                        Grouping::Folder,
-                    ] {
-                        changed |= ui
-                            .selectable_value(&mut l.default_grouping, g, grouping_label(g))
-                            .changed();
-                    }
-                });
-            changed
-        })
+        row(
+            ui,
+            theme,
+            "Open on",
+            "The library section to start in",
+            |ui| {
+                let mut changed = false;
+                egui::ComboBox::from_id_salt("grouping")
+                    .selected_text(grouping_label(l.default_grouping))
+                    .show_ui(ui, |ui| {
+                        for g in [
+                            Grouping::Songs,
+                            Grouping::Artists,
+                            Grouping::Albums,
+                            Grouping::Genres,
+                            Grouping::Folders,
+                        ] {
+                            changed |= ui
+                                .selectable_value(&mut l.default_grouping, g, grouping_label(g))
+                                .changed();
+                        }
+                    });
+                changed
+            },
+        )
         .apply(out);
 
         row(ui, theme, "Sort by", "Default track ordering", |ui| {
@@ -539,7 +728,7 @@ fn library_section(
             ui,
             theme,
             "Watch for changes",
-            "Update as files are added",
+            "Re-check the folders every minute or so",
             |ui| ui.checkbox(&mut l.watch_for_changes, "").changed(),
         )
         .apply(out);
@@ -927,54 +1116,9 @@ fn privacy_section(ui: &mut Ui, theme: &Theme, config: &mut Config, out: &mut Se
         note(
             ui,
             theme,
-            "Resonance works entirely offline. Nothing leaves your machine \
-             unless you turn this on.",
+            "Resonance works entirely offline. It has no network client, so \
+             there is nothing here to opt out of.",
         );
-
-        let was_online = config.privacy.online_metadata;
-
-        row(
-            ui,
-            theme,
-            "Online metadata",
-            "Look up artist info and artwork",
-            |ui| {
-                ui.checkbox(&mut config.privacy.online_metadata, "")
-                    .changed()
-            },
-        )
-        .apply(out);
-
-        if config.privacy.online_metadata {
-            let pr = &mut config.privacy;
-
-            row(
-                ui,
-                theme,
-                "MusicBrainz",
-                "Artist relations and genres",
-                |ui| ui.checkbox(&mut pr.use_musicbrainz, "").changed(),
-            )
-            .apply(out);
-
-            row(ui, theme, "Last.fm", "Similar artist suggestions", |ui| {
-                ui.checkbox(&mut pr.use_lastfm, "").changed()
-            })
-            .apply(out);
-
-            row(
-                ui,
-                theme,
-                "Fetch artwork",
-                "Only for albums with none",
-                |ui| ui.checkbox(&mut pr.fetch_missing_artwork, "").changed(),
-            )
-            .apply(out);
-        } else if was_online {
-            // `Config::validate` clears the providers; say so rather than
-            // letting the sub-toggles silently reset.
-            note(ui, theme, "Provider settings were turned off.");
-        }
 
         row(
             ui,
@@ -1131,12 +1275,11 @@ fn theme_label(mode: ThemeMode) -> &'static str {
 
 fn grouping_label(g: Grouping) -> &'static str {
     match g {
-        Grouping::Artist => "Artist",
-        Grouping::AlbumArtist => "Album artist",
-        Grouping::Album => "Album",
-        Grouping::Genre => "Genre",
-        Grouping::Year => "Year",
-        Grouping::Folder => "Folder",
+        Grouping::Songs => "Songs",
+        Grouping::Artists => "Artists",
+        Grouping::Albums => "Albums",
+        Grouping::Genres => "Genres",
+        Grouping::Folders => "Folders",
     }
 }
 
@@ -1200,12 +1343,11 @@ mod tests {
             assert!(!theme_label(mode).is_empty());
         }
         for g in [
-            Grouping::Artist,
-            Grouping::AlbumArtist,
-            Grouping::Album,
-            Grouping::Genre,
-            Grouping::Year,
-            Grouping::Folder,
+            Grouping::Songs,
+            Grouping::Artists,
+            Grouping::Albums,
+            Grouping::Genres,
+            Grouping::Folders,
         ] {
             assert!(!grouping_label(g).is_empty());
         }

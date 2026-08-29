@@ -8,6 +8,7 @@
 //! Output is **planar** (`Vec<Vec<f32>>`, one vec per channel) because that is
 //! what the resampler consumes; interleaving happens once, on the way out.
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -92,6 +93,68 @@ pub struct TrackDecoder {
 
     /// Reused across calls so steady-state decoding does not allocate.
     scratch: Vec<Vec<f32>>,
+
+    /// Drop digital silence at the start and end of the track.
+    trim_silence: bool,
+    /// Whether any audio has been emitted yet.
+    ///
+    /// While false, leading silence is still being skipped.
+    started: bool,
+    /// Fully silent chunks held back in case the track ends on them.
+    ///
+    /// Silence in the middle of a track is part of the music and has to be
+    /// played; silence at the end is padding. The two are indistinguishable
+    /// until either more audio arrives or the file runs out, so silence is
+    /// held here until one of those settles it.
+    held: Vec<DecodedChunk>,
+    /// Frames sitting in `held`, so the hold can be bounded without walking it.
+    held_frames: usize,
+    /// Chunks settled as playable and waiting to be handed out.
+    pending: VecDeque<DecodedChunk>,
+}
+
+/// Amplitude below which a sample counts as digital silence.
+///
+/// About -80 dBFS rather than exactly zero: a lossy encoder does not reproduce
+/// a silent passage as exact zeroes, so a threshold of zero would trim nothing
+/// on precisely the files that most often carry padding.
+const SILENCE: f32 = 1e-4;
+
+/// How much silence to hold before giving up and playing it.
+///
+/// Bounds the memory a long silent passage can cost, and means a hidden-track
+/// gap is played rather than swallowed. Trailing silence longer than this is
+/// trimmed down to this much instead of entirely, which is the safe way to be
+/// wrong.
+const MAX_HELD_SECS: f64 = 10.0;
+
+impl DecodedChunk {
+    /// Whether every sample in the chunk is below the silence threshold.
+    fn is_silent(&self) -> bool {
+        self.planes
+            .iter()
+            .all(|plane| plane.iter().all(|s| s.abs() < SILENCE))
+    }
+
+    /// Index of the first frame at or above the silence threshold.
+    fn first_sound(&self) -> Option<usize> {
+        (0..self.frames).find(|&frame| {
+            self.planes
+                .iter()
+                .any(|plane| plane.get(frame).is_some_and(|s| s.abs() >= SILENCE))
+        })
+    }
+
+    /// Drop the first `frames` frames.
+    fn skip(&mut self, frames: usize) {
+        if frames == 0 {
+            return;
+        }
+        for plane in &mut self.planes {
+            plane.drain(..frames.min(plane.len()));
+        }
+        self.frames = self.frames.saturating_sub(frames);
+    }
 }
 
 impl TrackDecoder {
@@ -178,6 +241,11 @@ impl TrackDecoder {
             duration,
             replay_gain: ReplayGain::default(),
             scratch: Vec::new(),
+            trim_silence: false,
+            started: false,
+            held: Vec::new(),
+            held_frames: 0,
+            pending: VecDeque::new(),
         };
 
         // Read while the file is open anyway. Doing it here rather than from
@@ -212,6 +280,15 @@ impl TrackDecoder {
         gain
     }
 
+    /// Skip digital silence at the start and end of this track.
+    ///
+    /// Off unless asked for: trimming changes what is heard, and a track whose
+    /// quiet intro is part of the recording should not lose it because a
+    /// setting defaulted on.
+    pub fn set_trim_silence(&mut self, trim: bool) {
+        self.trim_silence = trim;
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -233,12 +310,69 @@ impl TrackDecoder {
         self.replay_gain
     }
 
-    /// Decode the next block of audio.
+    /// Decode the next block of audio, trimming silence if asked to.
     ///
-    /// Returns `Ok(None)` at end of stream. Recoverable per-packet corruption is
-    /// skipped rather than propagated: a damaged frame in the middle of an MP3
-    /// should cost a few milliseconds of audio, not the rest of the track.
+    /// Returns `Ok(None)` at end of stream.
     pub fn next_chunk(&mut self) -> Result<Option<DecodedChunk>> {
+        if !self.trim_silence {
+            return self.decode_chunk();
+        }
+
+        loop {
+            // Anything already settled is owed to the caller first.
+            if let Some(chunk) = self.pending.pop_front() {
+                return Ok(Some(chunk));
+            }
+
+            let Some(mut chunk) = self.decode_chunk()? else {
+                // End of stream: whatever is still held was trailing padding,
+                // which is exactly what this setting exists to drop.
+                self.held.clear();
+                self.held_frames = 0;
+                return Ok(None);
+            };
+
+            if !self.started {
+                match chunk.first_sound() {
+                    // Still inside the leading silence.
+                    None => continue,
+                    Some(offset) => {
+                        chunk.skip(offset);
+                        self.started = true;
+                        return Ok(Some(chunk));
+                    }
+                }
+            }
+
+            if chunk.is_silent() {
+                self.held_frames += chunk.frames;
+                self.held.push(chunk);
+
+                // Held too long to still be plausibly trailing. Play it: a
+                // hidden-track gap is part of the record, and holding it
+                // forever would grow without bound.
+                let limit = (MAX_HELD_SECS * f64::from(self.sample_rate.max(1))) as usize;
+                if self.held_frames >= limit {
+                    self.pending.extend(self.held.drain(..));
+                    self.held_frames = 0;
+                }
+                continue;
+            }
+
+            // Sound again, so the silence behind it was interior after all and
+            // has to be played before this chunk.
+            self.pending.extend(self.held.drain(..));
+            self.held_frames = 0;
+            self.pending.push_back(chunk);
+        }
+    }
+
+    /// Decode one block, with no trimming applied.
+    ///
+    /// Recoverable per-packet corruption is skipped rather than propagated: a
+    /// damaged frame in the middle of an MP3 should cost a few milliseconds of
+    /// audio, not the rest of the track.
+    fn decode_chunk(&mut self) -> Result<Option<DecodedChunk>> {
         loop {
             let packet = match self.reader.next_packet() {
                 Ok(Some(packet)) => packet,
@@ -410,5 +544,82 @@ fn no_decoder_error(path: &Path, source: SymphoniaError) -> AudioError {
     AudioError::Decode {
         path: path.to_owned(),
         source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunk(samples: &[f32]) -> DecodedChunk {
+        DecodedChunk {
+            planes: vec![samples.to_vec(), samples.to_vec()],
+            frames: samples.len(),
+        }
+    }
+
+    #[test]
+    fn digital_silence_is_recognised() {
+        assert!(chunk(&[0.0, 0.0, 0.0]).is_silent());
+        assert!(!chunk(&[0.0, 0.5, 0.0]).is_silent());
+    }
+
+    #[test]
+    fn near_silence_from_a_lossy_encoder_still_counts_as_silent() {
+        // The reason the threshold is not zero: an encoder reproduces a silent
+        // passage as very small numbers, and an exact-zero test would trim
+        // nothing on the files that most often carry padding.
+        assert!(chunk(&[0.000_01, -0.000_02, 0.000_005]).is_silent());
+    }
+
+    #[test]
+    fn a_sample_at_the_threshold_is_sound() {
+        assert!(!chunk(&[SILENCE]).is_silent());
+        assert_eq!(chunk(&[0.0, SILENCE]).first_sound(), Some(1));
+    }
+
+    #[test]
+    fn the_first_sound_is_found_across_channels() {
+        // Sound in either channel starts the track: a track that fades in on
+        // one side only must not have that side trimmed away.
+        let lopsided = DecodedChunk {
+            planes: vec![vec![0.0, 0.0, 0.0], vec![0.0, 0.9, 0.0]],
+            frames: 3,
+        };
+        assert_eq!(lopsided.first_sound(), Some(1));
+    }
+
+    #[test]
+    fn a_fully_silent_chunk_has_no_first_sound() {
+        assert_eq!(chunk(&[0.0, 0.0]).first_sound(), None);
+    }
+
+    #[test]
+    fn skipping_drops_frames_from_every_channel() {
+        let mut c = chunk(&[0.0, 0.0, 0.4, 0.5]);
+        c.skip(2);
+
+        assert_eq!(c.frames, 2);
+        for plane in &c.planes {
+            assert_eq!(plane.as_slice(), &[0.4, 0.5]);
+        }
+    }
+
+    #[test]
+    fn skipping_nothing_leaves_the_chunk_alone() {
+        let mut c = chunk(&[0.1, 0.2]);
+        c.skip(0);
+        assert_eq!(c.frames, 2);
+    }
+
+    #[test]
+    fn skipping_past_the_end_cannot_panic_or_go_negative() {
+        let mut c = chunk(&[0.1, 0.2]);
+        c.skip(99);
+
+        assert_eq!(c.frames, 0);
+        for plane in &c.planes {
+            assert!(plane.is_empty());
+        }
     }
 }

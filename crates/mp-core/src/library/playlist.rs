@@ -368,19 +368,6 @@ pub fn rename(connection: &Connection, id: PlaylistId, name: &str, now: i64) -> 
     Ok(())
 }
 
-pub fn set_description(
-    connection: &Connection,
-    id: PlaylistId,
-    description: &str,
-    now: i64,
-) -> Result<()> {
-    connection.execute(
-        "UPDATE playlists SET description = ?2, updated_at = ?3 WHERE id = ?1",
-        params![id, description.trim(), now],
-    )?;
-    Ok(())
-}
-
 /// Replace a smart playlist's rules.
 pub fn set_rules(
     connection: &Connection,

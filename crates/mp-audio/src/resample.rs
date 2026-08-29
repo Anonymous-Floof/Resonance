@@ -98,14 +98,6 @@ impl Resampler {
         self.channels
     }
 
-    pub fn from_rate(&self) -> u32 {
-        self.from_rate
-    }
-
-    pub fn to_rate(&self) -> u32 {
-        self.to_rate
-    }
-
     /// True when input and output rates match and no filtering happens.
     pub fn is_passthrough(&self) -> bool {
         self.inner.is_none()

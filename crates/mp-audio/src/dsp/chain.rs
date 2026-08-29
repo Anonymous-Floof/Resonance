@@ -134,11 +134,6 @@ impl Chain {
         std::mem::replace(&mut self.tap, tap)
     }
 
-    /// Whether a visualiser is currently listening.
-    pub fn has_tap(&self) -> bool {
-        self.tap.is_some()
-    }
-
     /// Replace the non-filter parameters.
     ///
     /// A new equalizer bank goes through [`Self::set_bank`] instead, because it
@@ -166,11 +161,6 @@ impl Chain {
 
         self.incoming = Some((bank, BankState::new()));
         self.blend = 0.0;
-    }
-
-    /// The bank the chain is heading towards.
-    pub fn bank(&self) -> &Bank {
-        self.incoming.as_ref().map_or(&self.active.0, |(b, _)| b)
     }
 
     pub fn limiter(&self) -> &Limiter {

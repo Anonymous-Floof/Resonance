@@ -100,11 +100,6 @@ impl SurfaceStyle {
             Self::Visualizer => "The visualizer, dimmed and behind everything",
         }
     }
-
-    /// Whether this style needs something to be playing to show anything.
-    pub fn needs_playback(self) -> bool {
-        matches!(self, Self::AlbumArt | Self::Visualizer)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,7 +115,6 @@ pub struct Appearance {
     pub font_candidates: Vec<String>,
     /// Windows 11 Mica / acrylic window backdrop.
     pub mica_backdrop: bool,
-    pub show_visualizer_in_player_bar: bool,
 
     /// Background treatment for the main content area.
     pub content_background: SurfaceStyle,
@@ -146,7 +140,6 @@ impl Default for Appearance {
                 "Inter".to_owned(),
             ],
             mica_backdrop: true,
-            show_visualizer_in_player_bar: true,
             content_background: SurfaceStyle::Solid,
             player_background: SurfaceStyle::Solid,
             background_intensity: 0.6,
@@ -201,19 +194,14 @@ pub struct Playback {
     pub volume: f32,
     pub muted: bool,
     /// -1.0 = full left, 0.0 = centre, 1.0 = full right.
-    pub balance: f32,
     pub gapless: bool,
     pub crossfade_seconds: f32,
     pub crossfade_curve: CrossfadeCurve,
-    /// Short fade on pause/resume/seek to avoid clicks. Milliseconds.
-    pub fade_ms: u32,
     pub replay_gain: ReplayGainMode,
     /// Applied when a track has no ReplayGain tags, in dB.
     pub replay_gain_fallback_db: f32,
     /// Skip leading/trailing digital silence.
     pub trim_silence: bool,
-    /// Remember position for anything longer than this (mixes, DJ sets). Seconds.
-    pub resume_threshold_seconds: u32,
     /// `None` = system default device.
     pub output_device: Option<String>,
     /// Requested output buffer size in frames. `None` = let cpal decide.
@@ -236,15 +224,12 @@ impl Default for Playback {
             repeat: RepeatMode::Off,
             volume: 0.7,
             muted: false,
-            balance: 0.0,
             gapless: true,
             crossfade_seconds: 0.0,
             crossfade_curve: CrossfadeCurve::EqualPower,
-            fade_ms: 12,
             replay_gain: ReplayGainMode::Off,
             replay_gain_fallback_db: 0.0,
             trim_silence: false,
-            resume_threshold_seconds: 600,
             output_device: None,
             buffer_frames: None,
             play_on_single_click: false,
@@ -258,15 +243,30 @@ impl Default for Playback {
 // Library
 // ---------------------------------------------------------------------------
 
+/// The library section Resonance opens on.
+///
+/// Named for the views that exist rather than for ways of grouping in the
+/// abstract. An earlier version offered `Year`, which no view has ever been
+/// able to show, and split `Artist` from `AlbumArtist` when both land in the
+/// same place — a setting that offers a destination the app cannot reach is
+/// not a setting, it is a promise it breaks.
+///
+/// The aliases keep configs written by those builds loading: without them an
+/// unrecognised value fails the whole `[library]` section, which would take
+/// the user's watched folders down with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Grouping {
-    Artist,
-    AlbumArtist,
-    Album,
-    Genre,
-    Year,
-    Folder,
+    #[serde(alias = "year")]
+    Songs,
+    #[serde(alias = "artist", alias = "album_artist")]
+    Artists,
+    #[serde(alias = "album")]
+    Albums,
+    #[serde(alias = "genre")]
+    Genres,
+    #[serde(alias = "folder")]
+    Folders,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,8 +296,6 @@ pub struct Library {
     pub sort_descending: bool,
     /// Sort "The Wandering Hours" under B.
     pub ignore_leading_articles: bool,
-    /// Treat multi-artist albums as one album rather than one per artist.
-    pub group_compilations: bool,
     /// Files shorter than this are skipped (strips interstitials). Seconds.
     pub min_track_seconds: u32,
     /// Extensions considered for import, lowercase and without the dot.
@@ -319,11 +317,10 @@ impl Default for Library {
             watched_folders: Vec::new(),
             scan_on_startup: true,
             watch_for_changes: true,
-            default_grouping: Grouping::AlbumArtist,
+            default_grouping: Grouping::Songs,
             default_sort: SortKey::Title,
             sort_descending: false,
             ignore_leading_articles: true,
-            group_compilations: true,
             min_track_seconds: 5,
             extensions: [
                 "mp3", "flac", "wav", "m4a", "aac", "ogg", "oga", "opus", "wma", "aiff", "aif",
@@ -435,20 +432,25 @@ impl Default for Visualizer {
 }
 
 // ---------------------------------------------------------------------------
-// Privacy / network
+// Privacy
 // ---------------------------------------------------------------------------
 
+/// What Resonance records about you, which is the whole of the subject.
+///
+/// There is deliberately nothing here about network access. Resonance has no
+/// HTTP client and makes no requests, so a setting offering to turn networking
+/// on would be a control over something that does not exist. An earlier
+/// version carried exactly that — switches for MusicBrainz, Last.fm and
+/// artwork fetching that nothing ever read — and a settings screen full of
+/// decoration is worse than one that is simply short.
+///
+/// Artwork comes from embedded tags and sidecar files already on disk;
+/// suggestions come from the offline analysis pass. Neither needs permission
+/// to reach anything.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Privacy {
-    /// Master switch. While false the app makes no network requests at all.
-    pub online_metadata: bool,
-    pub use_musicbrainz: bool,
-    pub use_lastfm: bool,
-    pub fetch_missing_artwork: bool,
-    /// Days before cached online metadata is refetched.
-    pub cache_ttl_days: u32,
-    /// Record play counts and history locally.
+    /// Record play counts and listening history locally.
     pub track_play_history: bool,
     /// Include play counts and history when exporting a settings bundle.
     ///
@@ -461,11 +463,6 @@ pub struct Privacy {
 impl Default for Privacy {
     fn default() -> Self {
         Self {
-            online_metadata: false,
-            use_musicbrainz: false,
-            use_lastfm: false,
-            fetch_missing_artwork: false,
-            cache_ttl_days: 30,
             track_play_history: true,
             bundle_statistics: false,
         }
@@ -584,9 +581,7 @@ impl Config {
 
         let p = &mut self.playback;
         p.volume = p.volume.clamp(0.0, 1.0);
-        p.balance = p.balance.clamp(-1.0, 1.0);
         p.crossfade_seconds = p.crossfade_seconds.clamp(0.0, 12.0);
-        p.fade_ms = p.fade_ms.clamp(0, 500);
         p.replay_gain_fallback_db = p.replay_gain_fallback_db.clamp(-24.0, 24.0);
 
         let e = &mut self.equalizer;
@@ -611,14 +606,6 @@ impl Config {
         l.extensions.retain(|e| !e.is_empty());
         l.extensions.sort();
         l.extensions.dedup();
-
-        // Network access requires the master switch; keeping these consistent
-        // means the rest of the app only has to check one flag.
-        if !self.privacy.online_metadata {
-            self.privacy.use_musicbrainz = false;
-            self.privacy.use_lastfm = false;
-            self.privacy.fetch_missing_artwork = false;
-        }
 
         let w = &mut self.window;
         w.width = w.width.clamp(640.0, 10_000.0);
@@ -708,7 +695,6 @@ mod tests {
     fn validate_clamps_out_of_range_values() {
         let mut config = Config::default();
         config.playback.volume = 4.0;
-        config.playback.balance = -9.0;
         config.equalizer.gains_db = vec![99.0, -99.0]; // also too short
         config.visualizer.bar_count = 4;
         config.appearance.ui_scale = 17.0;
@@ -716,7 +702,6 @@ mod tests {
         config.validate();
 
         assert_eq!(config.playback.volume, 1.0);
-        assert_eq!(config.playback.balance, -1.0);
         assert_eq!(config.equalizer.gains_db.len(), EQ_BAND_COUNT);
         assert_eq!(config.equalizer.gains_db[0], Equalizer::MAX_GAIN_DB);
         assert_eq!(config.equalizer.gains_db[1], -Equalizer::MAX_GAIN_DB);
@@ -726,16 +711,36 @@ mod tests {
     }
 
     #[test]
-    fn disabling_online_metadata_disables_every_provider() {
-        let mut config = Config::default();
-        config.privacy.online_metadata = false;
-        config.privacy.use_lastfm = true;
-        config.privacy.fetch_missing_artwork = true;
+    fn a_config_from_an_older_build_still_loads_its_library_section() {
+        // The groupings an older build offered are gone. Without the aliases
+        // an unrecognised value fails the whole `[library]` table, and the
+        // user would silently lose their watched folders along with it.
+        for (written, expected) in [
+            ("artist", Grouping::Artists),
+            ("album_artist", Grouping::Artists),
+            ("album", Grouping::Albums),
+            ("genre", Grouping::Genres),
+            ("folder", Grouping::Folders),
+            ("year", Grouping::Songs),
+            ("songs", Grouping::Songs),
+            ("folders", Grouping::Folders),
+        ] {
+            let text = format!(
+                "[library]
+watched_folders = [\"/music\"]
+default_grouping = \"{written}\"
+"
+            );
+            let parsed: Config = toml::from_str(&text)
+                .unwrap_or_else(|err| panic!("{written} should still parse: {err}"));
 
-        config.validate();
-
-        assert!(!config.privacy.use_lastfm);
-        assert!(!config.privacy.fetch_missing_artwork);
+            assert_eq!(parsed.library.default_grouping, expected, "{written}");
+            assert_eq!(
+                parsed.library.watched_folders.len(),
+                1,
+                "{written} took the watched folders down with it"
+            );
+        }
     }
 
     #[test]

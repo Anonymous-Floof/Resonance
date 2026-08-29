@@ -91,6 +91,29 @@ const PLAY_CEILING_SECS: f64 = 240.0;
 /// The bar for a track whose duration the container never declared.
 const PLAY_UNKNOWN_SECS: f64 = 30.0;
 
+/// What a sleep timer is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Sleep {
+    /// Stop after this many more seconds.
+    ///
+    /// Counted against wall clock rather than against playback, because a
+    /// sleep timer is a promise about when the room goes quiet, not about how
+    /// much music gets heard. Pausing does not buy you more time.
+    In(f64),
+    /// Stop when the current track finishes.
+    EndOfTrack,
+}
+
+impl Sleep {
+    /// Seconds left, for anything that wants to show a countdown.
+    pub fn remaining(self) -> Option<f64> {
+        match self {
+            Self::In(secs) => Some(secs.max(0.0)),
+            Self::EndOfTrack => None,
+        }
+    }
+}
+
 /// How much listening to bank before writing it down.
 ///
 /// Listening is credited every frame but saved periodically: a database write
@@ -192,6 +215,9 @@ pub struct Player {
     /// Progress towards counting the open track as played.
     listening: Option<Listening>,
 
+    /// A pending sleep timer, if one is set.
+    sleep: Option<Sleep>,
+
     /// The track auto-radio should continue from.
     ///
     /// Remembered separately because by the time the queue has finished,
@@ -227,6 +253,7 @@ impl Player {
             current_index: None,
             queue_revision: 0,
             listening: None,
+            sleep: None,
             last_played: None,
             wants_radio: false,
         };
@@ -249,6 +276,11 @@ impl Player {
         engine.set_replay_gain(
             config.playback.replay_gain,
             config.playback.replay_gain_fallback_db,
+        );
+        engine.set_trim_silence(config.playback.trim_silence);
+        engine.set_crossfade(
+            config.playback.crossfade_seconds,
+            config.playback.crossfade_curve,
         );
     }
 
@@ -333,6 +365,22 @@ impl Player {
         self.send(Command::ClearQueue);
     }
 
+    // -- sleep timer -------------------------------------------------------
+
+    /// Arm, re-arm, or cancel the sleep timer.
+    pub fn set_sleep(&mut self, sleep: Option<Sleep>) {
+        self.sleep = sleep;
+    }
+
+    /// The pending sleep timer, if any.
+    pub fn sleep(&self) -> Option<Sleep> {
+        self.sleep
+    }
+
+    pub fn pause(&self) {
+        self.send(Command::Pause);
+    }
+
     /// The queue in play order.
     pub fn queue(&self) -> &[QueueEntry] {
         &self.queue
@@ -347,10 +395,6 @@ impl Player {
     pub fn queue_cursor(&self) -> Option<usize> {
         let current = self.current_index?;
         self.queue.iter().position(|entry| entry.index == current)
-    }
-
-    pub fn queue_len(&self) -> usize {
-        self.queue.len()
     }
 
     pub fn toggle_play_pause(&mut self) {
@@ -458,6 +502,19 @@ impl Player {
         };
         changed |= !events.is_empty();
 
+        if let Some(Sleep::In(remaining)) = self.sleep {
+            let left = remaining - f64::from(dt);
+            if left <= 0.0 {
+                self.sleep = None;
+                self.pause();
+                self.notice("Sleep timer finished.".to_owned(), false);
+                changed = true;
+            } else {
+                self.sleep = Some(Sleep::In(left));
+                changed = true;
+            }
+        }
+
         // Credited before the events are drained, so a track that finishes in
         // this frame is paid for the frame it finished in rather than losing
         // it to the `TrackStarted` that replaces the accumulator.
@@ -503,6 +560,14 @@ impl Player {
                     // accumulator is replaced and they are lost.
                     flush(&mut self.listening, library, track_history);
 
+                    // A track starting means the one the user meant to fall
+                    // asleep to has ended. Stop before the new one is heard.
+                    if self.sleep == Some(Sleep::EndOfTrack) {
+                        self.sleep = None;
+                        self.pause();
+                        self.notice("Sleep timer finished.".to_owned(), false);
+                    }
+
                     self.now_playing = Some(match library.track_at_path(&path) {
                         Some(track) => NowPlaying::from_track(&track, duration),
                         None => NowPlaying::from_path(path.clone(), duration),
@@ -516,6 +581,10 @@ impl Player {
                 }
 
                 Event::QueueFinished => {
+                    // Nothing more will play, so the timer has nothing left to
+                    // wait for. Leaving it armed would stop a queue the user
+                    // starts an hour later.
+                    self.sleep = None;
                     flush(&mut self.listening, library, track_history);
                     self.now_playing = None;
                     self.current_index = None;
@@ -783,6 +852,27 @@ mod tests {
         }
 
         assert!((total - 3_600.0).abs() < 0.1, "got {total}");
+    }
+
+    #[test]
+    fn a_sleep_timer_reports_what_is_left() {
+        assert_eq!(Sleep::In(90.0).remaining(), Some(90.0));
+        assert_eq!(Sleep::EndOfTrack.remaining(), None);
+    }
+
+    #[test]
+    fn a_sleep_timer_never_reports_negative_time() {
+        // The countdown clears itself at zero, but a frame long enough to
+        // overshoot must not surface as a negative number in the UI.
+        assert_eq!(Sleep::In(-3.0).remaining(), Some(0.0));
+    }
+
+    #[test]
+    fn sleep_modes_are_distinguishable() {
+        // The end-of-track arm and the countdown arm are checked separately in
+        // `update`; conflating them would stop playback at the wrong moment.
+        assert_ne!(Sleep::EndOfTrack, Sleep::In(0.0));
+        assert_eq!(Sleep::In(60.0), Sleep::In(60.0));
     }
 
     #[test]

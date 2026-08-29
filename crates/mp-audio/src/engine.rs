@@ -21,11 +21,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, Sender, TryRecvError};
-use mp_core::config::{Playback, RepeatMode, ReplayGainMode, ShuffleMode};
+use mp_core::config::{CrossfadeCurve, Playback, RepeatMode, ReplayGainMode, ShuffleMode};
 
 use crate::decode::TrackDecoder;
 use crate::device::{self, Output};
 use crate::dsp::chain::{Chain, Params};
+use crate::dsp::crossfade;
 use crate::dsp::eq::Bank;
 use crate::dsp::limiter::Settings as LimiterSettings;
 use crate::error::{AudioError, Result};
@@ -82,8 +83,6 @@ pub enum Command {
 
     /// Seek to a fraction of the current track, `0.0..=1.0`.
     SeekFraction(f32),
-    /// Seek by a signed number of seconds.
-    SeekRelative(f32),
 
     /// Volume as a `0.0..=1.0` slider position, not a raw gain.
     SetVolume(f32),
@@ -101,6 +100,13 @@ pub enum Command {
         gains_db: Vec<f32>,
         preamp_db: f32,
         limiter: bool,
+    },
+    /// Skip digital silence at the start and end of each track.
+    SetTrimSilence(bool),
+    /// Change the crossfade length and shape. Zero seconds switches it off.
+    SetCrossfade {
+        seconds: f32,
+        curve: CrossfadeCurve,
     },
     /// Change how per-track level correction is applied.
     SetReplayGain {
@@ -210,6 +216,13 @@ impl AudioEngine {
             dsp: None,
             seam: Seam::new(),
             gapless: settings.gapless,
+            trim_silence: settings.trim_silence,
+            crossfade_secs: settings.crossfade_seconds,
+            crossfade_curve: settings.crossfade_curve,
+            fading: None,
+            fade: Fade::default(),
+            decoded_frames: 0,
+            mix_scratch: Vec::new(),
             queue_revision: 0,
         };
 
@@ -332,6 +345,16 @@ impl AudioEngine {
         });
     }
 
+    /// Set the crossfade length and shape.
+    pub fn set_crossfade(&self, seconds: f32, curve: CrossfadeCurve) {
+        self.send(Command::SetCrossfade { seconds, curve });
+    }
+
+    /// Skip digital silence at the start and end of each track.
+    pub fn set_trim_silence(&self, trim: bool) {
+        self.send(Command::SetTrimSilence(trim));
+    }
+
     pub fn set_replay_gain(&self, mode: ReplayGainMode, fallback_db: f32) {
         self.send(Command::SetReplayGain { mode, fallback_db });
     }
@@ -407,9 +430,100 @@ struct Worker {
     seam: Seam,
     /// Whether to join tracks without flushing the ring.
     gapless: bool,
+    /// Whether to drop digital silence at track boundaries.
+    trim_silence: bool,
+
+    /// Length of the crossfade, in seconds. Zero switches it off.
+    crossfade_secs: f32,
+    crossfade_curve: CrossfadeCurve,
+    /// The track being faded out, while one is.
+    fading: Option<Fading>,
+    /// Progress through the current fade.
+    fade: Fade,
+    /// Device frames produced from the current track.
+    ///
+    /// Counted on the decode side, not the playback side. Decoding runs up to
+    /// a ring ahead, so a fade triggered from the playback position would be
+    /// attenuating audio that left the buffer seconds ago.
+    decoded_frames: u64,
+    /// Scratch for one mixed block, so the fade does not allocate per block.
+    mix_scratch: Vec<f32>,
 
     /// The queue revision last published to the UI.
     queue_revision: u64,
+}
+
+/// The outgoing track during a crossfade.
+///
+/// Kept whole — decoder, resampler and the samples already pulled out of it —
+/// because a fade has to keep decoding the track it is fading *out*, not just
+/// attenuate what happened to be buffered when it started.
+struct Fading {
+    decoder: Option<TrackDecoder>,
+    resampler: Resampler,
+    /// Interleaved samples pulled but not yet mixed.
+    ready: std::collections::VecDeque<f32>,
+}
+
+impl Fading {
+    fn new(decoder: TrackDecoder, resampler: Resampler) -> Self {
+        Self {
+            decoder: Some(decoder),
+            resampler,
+            ready: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Fill `out` with the outgoing track, zero-padding once it runs dry.
+    ///
+    /// Padding with silence rather than stopping the fade is deliberate: the
+    /// incoming track has to keep following the curve up to full level on
+    /// schedule, whether or not the outgoing one lasted long enough to meet it.
+    fn take(&mut self, out: &mut [f32]) {
+        while self.ready.len() < out.len() {
+            if let Some(block) = self.resampler.pull() {
+                self.ready.extend(block.iter().copied());
+                continue;
+            }
+
+            let Some(decoder) = self.decoder.as_mut() else {
+                break;
+            };
+
+            match decoder.next_chunk() {
+                Ok(Some(chunk)) => {
+                    self.resampler.push(&chunk.planes, chunk.frames);
+                    decoder.recycle(chunk);
+                }
+                Ok(None) => {
+                    if let Some(tail) = self.resampler.drain() {
+                        self.ready.extend(tail.iter().copied());
+                    }
+                    self.decoder = None;
+                    break;
+                }
+                Err(err) => {
+                    // The track being faded out is on its way to silence
+                    // anyway; a read error near its end is not worth
+                    // interrupting the incoming track for.
+                    tracing::debug!("crossfade tail ended early: {err}");
+                    self.decoder = None;
+                    break;
+                }
+            }
+        }
+
+        for slot in out.iter_mut() {
+            *slot = self.ready.pop_front().unwrap_or(0.0);
+        }
+    }
+}
+
+/// How far through a crossfade the stream is, in device frames.
+#[derive(Debug, Clone, Copy, Default)]
+struct Fade {
+    frame: u64,
+    total: u64,
 }
 
 /// The equalizer as the user configured it, before it becomes coefficients.
@@ -748,19 +862,27 @@ impl Worker {
                 }
             }
 
-            Command::SeekRelative(delta) => {
-                let target = (self.shared.position_secs() + f64::from(delta)).max(0.0);
-                let target = match self.shared.duration_secs() {
-                    Some(total) => target.min(total),
-                    None => target,
-                };
-                self.seek_to(Duration::from_secs_f64(target));
-            }
-
             Command::SetVolume(slider) => self.shared.set_gain(slider_to_gain(slider)),
             Command::SetMuted(muted) => self.shared.set_muted(muted),
             Command::SetRepeat(mode) => self.queue.set_repeat(mode),
             Command::SetShuffle(mode) => self.queue.set_shuffle(mode),
+
+            Command::SetCrossfade { seconds, curve } => {
+                self.crossfade_secs = seconds.max(0.0);
+                self.crossfade_curve = curve;
+                // A fade already running is left to finish on the settings it
+                // started with; changing the curve underneath it would step
+                // the gain.
+            }
+
+            Command::SetTrimSilence(trim) => {
+                self.trim_silence = trim;
+                // Applies from the next track: retrimming the one already
+                // decoding would jump the playhead.
+                if let Some(decoder) = &mut self.decoder {
+                    decoder.set_trim_silence(trim);
+                }
+            }
 
             Command::SetEqualizer {
                 enabled,
@@ -816,6 +938,9 @@ impl Worker {
     fn begin(&mut self, path: PathBuf) {
         self.shared.set_priming(true);
         self.carry.clear();
+        // Whatever was fading belonged to audio that is about to be discarded.
+        self.fading = None;
+        self.decoded_frames = 0;
         // Anything buffered is about to be thrown away, and so is every track
         // boundary inside it.
         self.seam.clear();
@@ -829,7 +954,8 @@ impl Worker {
     /// unreadable file in a folder should not end the listening session.
     fn open_track(&mut self, path: &Path) {
         match TrackDecoder::open(path) {
-            Ok(decoder) => {
+            Ok(mut decoder) => {
+                decoder.set_trim_silence(self.trim_silence);
                 let rate = decoder.sample_rate();
                 let channels = self.shared.device_channels();
                 let duration = decoder.duration();
@@ -844,6 +970,7 @@ impl Worker {
                         self.shared.reset_for_new_track(duration);
                         self.resampler = Some(resampler);
                         self.decoder = Some(decoder);
+                        self.decoded_frames = 0;
 
                         self.track_gain_db = replay_gain.for_mode(self.replay_gain_mode);
                         self.publish_params();
@@ -900,6 +1027,8 @@ impl Worker {
             return worked;
         }
 
+        self.maybe_start_crossfade();
+
         let mut failure = None;
         let mut reached_eof = false;
 
@@ -912,6 +1041,11 @@ impl Worker {
                 resampler,
                 producer,
                 carry,
+                fading,
+                fade,
+                crossfade_curve,
+                decoded_frames,
+                mix_scratch,
                 ..
             } = self;
 
@@ -936,7 +1070,38 @@ impl Worker {
                 }
 
                 if let Some(block) = resampler.pull() {
-                    Self::push_block(producer, shared, carry, block);
+                    let channels = shared.device_channels().max(1);
+                    *decoded_frames += (block.len() / channels) as u64;
+
+                    match fading.as_mut() {
+                        // Blend the outgoing track over this block. The
+                        // outgoing stream is pulled to exactly this length and
+                        // zero-padded if it has already ended, so the incoming
+                        // one reaches full level on schedule either way.
+                        Some(out) if fade.frame < fade.total => {
+                            mix_scratch.clear();
+                            mix_scratch.resize(block.len(), 0.0);
+                            out.take(mix_scratch.as_mut_slice());
+
+                            crossfade::mix(
+                                mix_scratch,
+                                block,
+                                channels,
+                                *crossfade_curve,
+                                fade.frame,
+                                fade.total,
+                            );
+                            fade.frame += (block.len() / channels) as u64;
+
+                            Self::push_block(producer, shared, carry, mix_scratch);
+                        }
+                        _ => {
+                            // Either no fade, or one that has run its course.
+                            *fading = None;
+                            Self::push_block(producer, shared, carry, block);
+                        }
+                    }
+
                     worked = true;
                     continue;
                 }
@@ -995,6 +1160,56 @@ impl Worker {
         worked
     }
 
+    /// Begin a crossfade if the current track is close enough to its end.
+    ///
+    /// Nothing happens without a known duration: a fade has to be scheduled
+    /// against the end of the track, and a container that will not say how long
+    /// it is cannot be scheduled against. Those tracks join gaplessly instead,
+    /// which is the behaviour they had before crossfade existed.
+    fn maybe_start_crossfade(&mut self) {
+        if self.crossfade_secs <= 0.0 || self.fading.is_some() || self.decoder.is_none() {
+            return;
+        }
+
+        let Some(duration) = self.decoder.as_ref().and_then(TrackDecoder::duration) else {
+            return;
+        };
+
+        let rate = f64::from(self.shared.device_rate().max(1));
+        let produced = self.decoded_frames as f64 / rate;
+        let left = duration.as_secs_f64() - produced;
+
+        if left > f64::from(self.crossfade_secs) {
+            return;
+        }
+
+        let (Some(decoder), Some(resampler)) = (self.decoder.take(), self.resampler.take()) else {
+            return;
+        };
+
+        // Park the outgoing track, then install the next one exactly the way a
+        // gapless join does. Reusing that path means the seam boundary, and so
+        // the moment the title, position and level correction change, is
+        // decided in one place rather than two that can disagree.
+        self.fading = Some(Fading::new(decoder, resampler));
+
+        if self.open_next_gaplessly() {
+            let total = (f64::from(self.crossfade_secs) * rate) as u64;
+            self.fade = Fade {
+                frame: 0,
+                total: total.max(1),
+            };
+            return;
+        }
+
+        // Nothing to fade into: the queue is done. Put the outgoing track back
+        // and let it finish the way it would have.
+        if let Some(parked) = self.fading.take() {
+            self.decoder = parked.decoder;
+            self.resampler = Some(parked.resampler);
+        }
+    }
+
     /// Continue the buffered stream with the next queue entry.
     ///
     /// Returns whether a track was opened. `false` means the queue is finished
@@ -1011,7 +1226,8 @@ impl Worker {
             };
 
             match TrackDecoder::open(&path) {
-                Ok(decoder) => {
+                Ok(mut decoder) => {
+                    decoder.set_trim_silence(self.trim_silence);
                     let rate = decoder.sample_rate();
                     let channels = self.shared.device_channels();
                     let duration = decoder.duration();
@@ -1021,6 +1237,7 @@ impl Worker {
                         Ok(resampler) => {
                             self.resampler = Some(resampler);
                             self.decoder = Some(decoder);
+                            self.decoded_frames = 0;
 
                             self.seam.push(Pending {
                                 at_frame,
@@ -1211,6 +1428,8 @@ impl Worker {
     fn stop(&mut self) {
         self.decoder = None;
         self.resampler = None;
+        self.fading = None;
+        self.decoded_frames = 0;
         self.carry.clear();
         self.shared.set_priming(true);
         self.discard_buffered();
@@ -1340,5 +1559,57 @@ mod tests {
         // 64 samples of a 2-channel stream is 32 frames.
         assert_eq!(shared.pushed_frames(), 32);
         assert_eq!(carry.len(), 136);
+    }
+
+    /// An outgoing stream with nothing left to decode.
+    fn drained(ready: &[f32]) -> Fading {
+        Fading {
+            decoder: None,
+            resampler: Resampler::new(48_000, 48_000, 2).expect("passthrough resampler"),
+            ready: ready.iter().copied().collect(),
+        }
+    }
+
+    #[test]
+    fn a_drained_outgoing_track_pads_with_silence() {
+        // The failure this guards: leaving the caller's buffer untouched past
+        // the end of the outgoing track would mix whatever was in it last time
+        // back into the fade, as a burst of stale audio.
+        let mut fading = drained(&[0.5, -0.5]);
+        let mut out = vec![9.0; 6];
+
+        fading.take(&mut out);
+
+        assert_eq!(out, vec![0.5, -0.5, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn an_outgoing_track_is_handed_out_in_order_across_calls() {
+        let mut fading = drained(&[1.0, 2.0, 3.0, 4.0]);
+
+        let mut first = vec![0.0; 2];
+        fading.take(&mut first);
+        let mut second = vec![0.0; 2];
+        fading.take(&mut second);
+
+        assert_eq!(first, vec![1.0, 2.0]);
+        assert_eq!(second, vec![3.0, 4.0], "the fade must not repeat samples");
+    }
+
+    #[test]
+    fn a_fully_drained_outgoing_track_is_pure_silence() {
+        let mut fading = drained(&[]);
+        let mut out = vec![7.0; 4];
+
+        fading.take(&mut out);
+
+        assert!(out.iter().all(|s| *s == 0.0), "{out:?}");
+    }
+
+    #[test]
+    fn a_fade_starts_at_the_beginning_of_its_length() {
+        let fade = Fade::default();
+        assert_eq!(fade.frame, 0);
+        assert_eq!(fade.total, 0, "a zero total means no fade is running");
     }
 }

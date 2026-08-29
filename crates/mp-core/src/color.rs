@@ -214,11 +214,6 @@ impl Oklab {
         self.a.hypot(self.b)
     }
 
-    /// Hue angle in radians. Meaningless for near-greys.
-    pub fn hue(self) -> f32 {
-        self.b.atan2(self.a)
-    }
-
     /// The same hue and colourfulness at a different lightness.
     ///
     /// Scaling `a` and `b` along with `l` keeps the *relative* colourfulness
