@@ -330,7 +330,7 @@ fn playback_section(
                 ui,
                 theme,
                 &format!(
-                    "{} crossfade{} so far this session. Fades happen at the                      end of a track, not when you press skip.",
+                    "{} crossfade{} so far this session, at track ends rather than skips.",
                     live.fades,
                     if live.fades == 1 { "" } else { "s" }
                 ),
