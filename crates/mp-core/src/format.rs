@@ -217,8 +217,11 @@ mod tests {
     /// The real case from the target collection: an Opus file named `.mp3`.
     #[test]
     fn sniff_sees_through_a_wrong_extension() {
-        let dir = std::env::temp_dir().join(format!("resonance-sniff-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = tempfile::Builder::new()
+            .prefix("resonance-sniff-")
+            .tempdir()
+            .unwrap();
+        let dir = scratch.path();
         let path = dir.join("mislabelled.mp3");
 
         // An Ogg page header followed by the Opus codec identifier.
@@ -233,7 +236,7 @@ mod tests {
         // Reading the header tells the truth.
         assert_eq!(sniff(&path), Some("Ogg Opus"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

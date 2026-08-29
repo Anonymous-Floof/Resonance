@@ -24,6 +24,7 @@ tracing.workspace = true
 windows.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 naga.workspace = true
 # Playlist state tests build a small library fixture directly.
 rusqlite.workspace = true

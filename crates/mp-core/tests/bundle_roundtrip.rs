@@ -11,15 +11,16 @@ use mp_core::Config;
 use mp_core::bundle::{self, ExportOptions, Mode};
 use mp_core::library::{Library, Progress, ScanOptions};
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "resonance-bundle-{name}-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A scratch directory that removes itself when the guard is dropped.
+///
+/// Returned rather than a bare path so that a failing assertion cleans up too:
+/// the names carry a pid, so a directory left behind by one run is never
+/// reused by the next, it just accumulates. Callers use `.path()`.
+fn scratch(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("resonance-bundle-{name}-"))
+        .tempdir()
+        .unwrap()
 }
 
 /// Files recognised by extension. Nothing here decodes them.
@@ -70,11 +71,12 @@ fn playlist_named(library: &Library, name: &str) -> Option<mp_core::library::Pla
 
 #[test]
 fn settings_and_playlists_survive_a_round_trip() {
-    let dir = scratch("roundtrip");
-    music(&dir, &["a.mp3", "deep/b.flac", "c.wav"]);
+    let scratch_dir = scratch("roundtrip");
+    let dir = scratch_dir.path();
+    music(dir, &["a.mp3", "deep/b.flac", "c.wav"]);
 
     // -- the machine being left behind
-    let mut library = scanned(&dir);
+    let mut library = scanned(dir);
 
     let ids: Vec<i64> = library
         .tracks(&Default::default(), mp_core::library::Order::Title, false)
@@ -95,7 +97,7 @@ fn settings_and_playlists_survive_a_round_trip() {
     let mut config = Config::default();
     config.appearance.accent = "#FF8800".into();
     config.playback.volume = 0.42;
-    config.library.watched_folders = vec![dir.clone()];
+    config.library.watched_folders = vec![dir.to_path_buf()];
 
     let bundle_path = dir.join("settings.mpbundle");
     let manifest = bundle::export(
@@ -115,7 +117,7 @@ fn settings_and_playlists_survive_a_round_trip() {
 
     // -- the new machine: same music, nothing configured
     let mut fresh_config = Config::default();
-    let mut fresh = scanned(&dir);
+    let mut fresh = scanned(dir);
 
     let summary =
         bundle::import(&bundle_path, &mut fresh_config, &mut fresh, Mode::Replace).unwrap();
@@ -137,17 +139,18 @@ fn settings_and_playlists_survive_a_round_trip() {
     let smart = playlist_named(&fresh, "Everything").expect("the smart one too");
     assert!(smart.rules.is_some(), "its rules should have come with it");
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Importing the same bundle twice must leave the library exactly as the first
 /// import did — otherwise "did that work?" cannot be answered by retrying.
 #[test]
 fn importing_twice_changes_nothing_the_second_time() {
-    let dir = scratch("idempotent");
-    music(&dir, &["a.mp3", "b.mp3"]);
+    let scratch_dir = scratch("idempotent");
+    let dir = scratch_dir.path();
+    music(dir, &["a.mp3", "b.mp3"]);
 
-    let mut library = scanned(&dir);
+    let mut library = scanned(dir);
     let ids: Vec<i64> = library
         .tracks(&Default::default(), mp_core::library::Order::Title, false)
         .unwrap()
@@ -175,7 +178,7 @@ fn importing_twice_changes_nothing_the_second_time() {
     .unwrap();
 
     let mut config = Config::default();
-    let mut fresh = scanned(&dir);
+    let mut fresh = scanned(dir);
 
     let first = bundle::import(&bundle_path, &mut config, &mut fresh, Mode::Replace).unwrap();
     assert_eq!(first.playlists_added, 1);
@@ -211,16 +214,17 @@ fn importing_twice_changes_nothing_the_second_time() {
         );
     }
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Merge is for filling gaps, not for overwriting what is already there.
 #[test]
 fn merging_leaves_existing_settings_and_playlists_alone() {
-    let dir = scratch("merge");
-    music(&dir, &["a.mp3", "b.mp3"]);
+    let scratch_dir = scratch("merge");
+    let dir = scratch_dir.path();
+    music(dir, &["a.mp3", "b.mp3"]);
 
-    let mut source = scanned(&dir);
+    let mut source = scanned(dir);
     let ids: Vec<i64> = source
         .tracks(&Default::default(), mp_core::library::Order::Title, false)
         .unwrap()
@@ -246,7 +250,7 @@ fn merging_leaves_existing_settings_and_playlists_alone() {
     .unwrap();
 
     // The destination already has a playlist by that name, with one track.
-    let mut destination = scanned(&dir);
+    let mut destination = scanned(dir);
     let mine = destination.create_playlist("Shared Name").unwrap();
     destination.add_to_playlist(mine, &ids[..1]).unwrap();
 
@@ -270,17 +274,18 @@ fn merging_leaves_existing_settings_and_playlists_alone() {
 
     assert!(playlist_named(&destination, "Only In The Bundle").is_some());
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A bundle from a machine with more music than this one has must import what
 /// it can and say plainly what it could not.
 #[test]
 fn tracks_that_are_not_here_are_reported() {
-    let dir = scratch("missing");
-    music(&dir, &["here.mp3"]);
+    let scratch_dir = scratch("missing");
+    let dir = scratch_dir.path();
+    music(dir, &["here.mp3"]);
 
-    let mut source = scanned(&dir);
+    let mut source = scanned(dir);
     let here = source.id_for_path(&dir.join("here.mp3")).unwrap().unwrap();
 
     // A playlist referring to a file this machine will not have.
@@ -316,15 +321,16 @@ fn tracks_that_are_not_here_are_reported() {
         summary.summary()
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn statistics_are_only_included_when_asked_for() {
-    let dir = scratch("stats-opt-in");
-    music(&dir, &["a.mp3"]);
+    let scratch_dir = scratch("stats-opt-in");
+    let dir = scratch_dir.path();
+    music(dir, &["a.mp3"]);
 
-    let library = scanned(&dir);
+    let library = scanned(dir);
     let id = library.id_for_path(&dir.join("a.mp3")).unwrap().unwrap();
     library.record_play(id).unwrap();
 
@@ -355,7 +361,7 @@ fn statistics_are_only_included_when_asked_for() {
     assert!(manifest.has_statistics);
 
     // And the counts actually arrive.
-    let mut fresh = scanned(&dir);
+    let mut fresh = scanned(dir);
     let mut config = Config::default();
     let summary = bundle::import(&with, &mut config, &mut fresh, Mode::Replace).unwrap();
 
@@ -364,12 +370,13 @@ fn statistics_are_only_included_when_asked_for() {
     assert_eq!(stats.len(), 1);
     assert_eq!(stats[0].play_count, 1);
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn something_that_is_not_a_bundle_is_refused_before_anything_is_applied() {
-    let dir = scratch("not-a-bundle");
+    let scratch_dir = scratch("not-a-bundle");
+    let dir = scratch_dir.path();
 
     let text = dir.join("notes.txt");
     std::fs::write(&text, b"just some text").unwrap();
@@ -401,16 +408,17 @@ fn something_that_is_not_a_bundle_is_refused_before_anything_is_applied() {
         "the refusal should explain itself"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A failed export must not leave a broken file where a good one was.
 #[test]
 fn an_exported_bundle_is_a_readable_zip_with_the_expected_members() {
-    let dir = scratch("members");
-    music(&dir, &["a.mp3"]);
+    let scratch_dir = scratch("members");
+    let dir = scratch_dir.path();
+    music(dir, &["a.mp3"]);
 
-    let library = scanned(&dir);
+    let library = scanned(dir);
     let path = dir.join("out.mpbundle");
 
     bundle::export(
@@ -449,5 +457,5 @@ fn an_exported_bundle_is_a_readable_zip_with_the_expected_members() {
         "a temporary file was left behind"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }

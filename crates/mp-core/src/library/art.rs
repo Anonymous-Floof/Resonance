@@ -298,15 +298,14 @@ fn content_id(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "resonance-art-{name}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A scratch directory that removes itself when the guard is dropped,
+    /// so a failing assertion does not leave one behind. Callers use
+    /// `scratch.path()`.
+    fn temp_dir(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("resonance-art-{name}-"))
+            .tempdir()
+            .unwrap()
     }
 
     /// A tiny valid PNG, generated rather than embedded so the test has no
@@ -322,8 +321,9 @@ mod tests {
 
     #[test]
     fn identical_covers_share_one_id_and_one_set_of_files() {
-        let dir = temp_dir("dedupe");
-        let cache = ArtCache::new(&dir);
+        let scratch = temp_dir("dedupe");
+        let dir = scratch.path();
+        let cache = ArtCache::new(dir);
 
         let cover = png(300, 300, 128);
         let first = cache.store(&cover).unwrap();
@@ -332,18 +332,17 @@ mod tests {
         assert_eq!(first, second, "the same bytes must produce the same id");
 
         // Every size, plus the one palette derived from them.
-        let files = walk_count(&dir);
+        let files = walk_count(dir);
         assert_eq!(files, ArtSize::ALL.len() + 1, "one cover, one set of files");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The palette is written during the scan, so nothing has to decode a
     /// cover on the UI thread when a track changes.
     #[test]
     fn storing_a_cover_extracts_its_palette() {
-        let dir = temp_dir("palette");
-        let cache = ArtCache::new(&dir);
+        let scratch = temp_dir("palette");
+        let dir = scratch.path();
+        let cache = ArtCache::new(dir);
 
         let art_id = cache.store(&coloured_png(200, 200)).unwrap();
 
@@ -354,16 +353,15 @@ mod tests {
 
         let palette = cache.palette(&art_id).expect("a palette was just written");
         assert!(palette.accent.is_some(), "this cover has an obvious colour");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A library scanned before palettes existed has covers but no palettes.
     /// They must fill themselves in rather than staying blank forever.
     #[test]
     fn a_missing_palette_is_recomputed_from_the_cached_cover() {
-        let dir = temp_dir("backfill");
-        let cache = ArtCache::new(&dir);
+        let scratch = temp_dir("backfill");
+        let dir = scratch.path();
+        let cache = ArtCache::new(dir);
 
         let art_id = cache.store(&coloured_png(200, 200)).unwrap();
         let expected = cache.palette(&art_id).unwrap();
@@ -378,49 +376,46 @@ mod tests {
             cache.palette_path(&art_id).is_file(),
             "the rebuilt palette should be cached, not recomputed every time"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn removing_a_cover_takes_its_palette_with_it() {
-        let dir = temp_dir("remove");
-        let cache = ArtCache::new(&dir);
+        let scratch = temp_dir("remove");
+        let dir = scratch.path();
+        let cache = ArtCache::new(dir);
 
         let art_id = cache.store(&coloured_png(120, 120)).unwrap();
         cache.remove(&art_id);
 
-        assert_eq!(walk_count(&dir), 0, "nothing should be left behind");
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(walk_count(dir), 0, "nothing should be left behind");
     }
 
     #[test]
     fn asking_for_the_palette_of_a_cover_we_do_not_have_is_none() {
-        let dir = temp_dir("absent");
-        let cache = ArtCache::new(&dir);
+        let scratch = temp_dir("absent");
+        let dir = scratch.path();
+        let cache = ArtCache::new(dir);
         assert!(cache.palette("0123456789abcdef").is_none());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn different_covers_get_different_ids() {
-        let dir = temp_dir("distinct");
-        let cache = ArtCache::new(&dir);
+        let scratch = temp_dir("distinct");
+        let dir = scratch.path();
+        let cache = ArtCache::new(dir);
 
         let a = cache.store(&png(64, 64, 10)).unwrap();
         let b = cache.store(&png(64, 64, 200)).unwrap();
         assert_ne!(a, b);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Covers are stored small so the UI never decodes a 3000 px image to draw
     /// a 64 px row.
     #[test]
     fn stored_covers_are_resized_down() {
-        let dir = temp_dir("resize");
-        let cache = ArtCache::new(&dir);
+        let scratch = temp_dir("resize");
+        let dir = scratch.path();
+        let cache = ArtCache::new(dir);
 
         let art_id = cache.store(&png(1200, 1200, 90)).unwrap();
 
@@ -434,37 +429,34 @@ mod tests {
                 decoded.width()
             );
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_corrupt_image_is_an_error_not_a_panic() {
-        let dir = temp_dir("corrupt");
-        let cache = ArtCache::new(&dir);
+        let scratch = temp_dir("corrupt");
+        let dir = scratch.path();
+        let cache = ArtCache::new(dir);
         assert!(cache.store(b"this is not an image").is_err());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_best_named_sidecar_wins() {
-        let dir = temp_dir("sidecar");
+        let scratch = temp_dir("sidecar");
+        let dir = scratch.path();
         std::fs::write(dir.join("front.jpg"), png(8, 8, 1)).unwrap();
         std::fs::write(dir.join("cover.png"), png(8, 8, 2)).unwrap();
         std::fs::write(dir.join("screenshot.png"), png(8, 8, 3)).unwrap();
 
-        let found = sidecar_in(&dir).expect("a sidecar should be found");
+        let found = sidecar_in(dir).expect("a sidecar should be found");
         assert_eq!(found.file_stem().unwrap(), "cover");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_folder_with_no_cover_yields_nothing() {
-        let dir = temp_dir("bare");
+        let scratch = temp_dir("bare");
+        let dir = scratch.path();
         std::fs::write(dir.join("song.mp3"), b"x").unwrap();
-        assert!(sidecar_in(&dir).is_none());
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(sidecar_in(dir).is_none());
     }
 
     /// A dark cover with a bright coloured block, so there is an accent to

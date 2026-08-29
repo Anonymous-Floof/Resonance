@@ -11,20 +11,21 @@
 //! to come back byte-identical — frame ordering and padding are its business —
 //! but not one sample of the music may change.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use mp_core::library::tags::{self, Editable};
 use mp_core::library::{Library, Progress, ScanOptions};
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "resonance-tagedit-{name}-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A scratch directory that removes itself when the guard is dropped.
+///
+/// Returned rather than a bare path so that a failing assertion cleans up too:
+/// the names carry a pid, so a directory left behind by one run is never
+/// reused by the next, it just accumulates. Callers use `.path()`.
+fn scratch(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("resonance-tagedit-{name}-"))
+        .tempdir()
+        .unwrap()
 }
 
 /// A minimal but genuinely valid WAV, so lofty parses and tags it for real.
@@ -99,7 +100,8 @@ fn value_of(path: &Path, field: Editable) -> Option<String> {
 /// The single most important property in the whole feature.
 #[test]
 fn editing_a_tag_does_not_touch_one_sample_of_audio() {
-    let dir = scratch("audio-intact");
+    let scratch_dir = scratch("audio-intact");
+    let dir = scratch_dir.path();
     let file = dir.join("song.wav");
     write_wav(&file);
 
@@ -119,12 +121,13 @@ fn editing_a_tag_does_not_touch_one_sample_of_audio() {
     assert_eq!(before.len(), after.len(), "the audio changed length");
     assert_eq!(before, after, "the audio was modified by a tag edit");
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn a_written_tag_can_be_read_back() {
-    let dir = scratch("roundtrip");
+    let scratch_dir = scratch("roundtrip");
+    let dir = scratch_dir.path();
     let file = dir.join("song.wav");
     write_wav(&file);
 
@@ -148,14 +151,15 @@ fn a_written_tag_can_be_read_back() {
     );
     assert_eq!(value_of(&file, Editable::Year).as_deref(), Some("1997"));
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Writing the values a file already has must not touch it at all — not the
 /// bytes, and not the modification time the scanner watches.
 #[test]
 fn a_no_op_edit_does_not_write_the_file() {
-    let dir = scratch("noop");
+    let scratch_dir = scratch("noop");
+    let dir = scratch_dir.path();
     let file = dir.join("song.wav");
     write_wav(&file);
 
@@ -178,13 +182,14 @@ fn a_no_op_edit_does_not_write_the_file() {
         "the modification time moved, which would make the scanner re-read it"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// The promise the undo journal makes: the values come back.
 #[test]
 fn reverting_restores_every_field_it_changed() {
-    let dir = scratch("revert");
+    let scratch_dir = scratch("revert");
+    let dir = scratch_dir.path();
     let file = dir.join("song.wav");
     write_wav(&file);
 
@@ -240,13 +245,14 @@ fn reverting_restores_every_field_it_changed() {
 
     assert_eq!(audio_of(&file), audio, "the audio changed during undo");
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// If something else has edited the file since, undo would throw that away.
 #[test]
 fn reverting_refuses_when_the_file_has_moved_on() {
-    let dir = scratch("stale");
+    let scratch_dir = scratch("stale");
+    let dir = scratch_dir.path();
     let file = dir.join("song.wav");
     write_wav(&file);
 
@@ -270,13 +276,14 @@ fn reverting_refuses_when_the_file_has_moved_on() {
         "the refusal should say why: {message}"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Fields the edit never mentions must survive it untouched.
 #[test]
 fn an_edit_leaves_the_fields_it_did_not_name_alone() {
-    let dir = scratch("untouched");
+    let scratch_dir = scratch("untouched");
+    let dir = scratch_dir.path();
     let file = dir.join("song.wav");
     write_wav(&file);
 
@@ -308,7 +315,7 @@ fn an_edit_leaves_the_fields_it_did_not_name_alone() {
         Some("And This Too")
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -329,11 +336,12 @@ fn library_with(dir: &Path) -> Library {
 
 #[test]
 fn an_edit_through_the_library_is_journalled_and_undoable() {
-    let dir = scratch("journal");
+    let scratch_dir = scratch("journal");
+    let dir = scratch_dir.path();
     let file = dir.join("song.wav");
     write_wav(&file);
 
-    let mut library = library_with(&dir);
+    let mut library = library_with(dir);
     let id = library
         .id_for_path(&file)
         .unwrap()
@@ -373,16 +381,17 @@ fn an_edit_through_the_library_is_journalled_and_undoable() {
         "the journal should record the undo"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn undoing_the_same_edit_twice_is_refused() {
-    let dir = scratch("double-undo");
+    let scratch_dir = scratch("double-undo");
+    let dir = scratch_dir.path();
     let file = dir.join("song.wav");
     write_wav(&file);
 
-    let mut library = library_with(&dir);
+    let mut library = library_with(dir);
     let id = library.id_for_path(&file).unwrap().unwrap();
 
     let record = library
@@ -395,18 +404,19 @@ fn undoing_the_same_edit_twice_is_refused() {
 
     assert!(second.is_err(), "the second undo should have been refused");
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// An edit that changes nothing must not leave a row in the history, or the
 /// journal fills up with entries that did not happen.
 #[test]
 fn a_no_op_edit_is_not_journalled() {
-    let dir = scratch("journal-noop");
+    let scratch_dir = scratch("journal-noop");
+    let dir = scratch_dir.path();
     let file = dir.join("song.wav");
     write_wav(&file);
 
-    let mut library = library_with(&dir);
+    let mut library = library_with(dir);
     let id = library.id_for_path(&file).unwrap().unwrap();
 
     library
@@ -425,18 +435,19 @@ fn a_no_op_edit_is_not_journalled() {
         "the no-op should not be in the history"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// The preview is what the confirmation step shows, so it has to agree with
 /// what the write then does.
 #[test]
 fn the_preview_matches_what_the_write_reports() {
-    let dir = scratch("preview");
+    let scratch_dir = scratch("preview");
+    let dir = scratch_dir.path();
     let file = dir.join("song.wav");
     write_wav(&file);
 
-    let mut library = library_with(&dir);
+    let mut library = library_with(dir);
     let id = library.id_for_path(&file).unwrap().unwrap();
 
     let edit = tags::Edit::default()
@@ -448,5 +459,5 @@ fn the_preview_matches_what_the_write_reports() {
 
     assert_eq!(preview, record.changes, "the user was shown something else");
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }

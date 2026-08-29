@@ -648,11 +648,32 @@ fn migrate(config: &mut Config, from_version: u32) {
 mod tests {
     use super::*;
 
-    fn temp_paths(tag: &str) -> AppPaths {
-        let dir =
-            std::env::temp_dir().join(format!("resonance-test-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        AppPaths::rooted_at(dir).expect("temp paths")
+    /// An [`AppPaths`] in a directory that deletes itself when it goes out of
+    /// scope, panicking tests included.
+    ///
+    /// Derefs to `AppPaths`, so it can be passed anywhere one is expected. The
+    /// guard has to be *held*, though: `&temp_paths("x")` would drop the
+    /// directory before the call it was made for.
+    struct TempPaths {
+        paths: AppPaths,
+        _dir: tempfile::TempDir,
+    }
+
+    impl std::ops::Deref for TempPaths {
+        type Target = AppPaths;
+
+        fn deref(&self) -> &AppPaths {
+            &self.paths
+        }
+    }
+
+    fn temp_paths(tag: &str) -> TempPaths {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("resonance-test-{tag}-"))
+            .tempdir()
+            .expect("temp dir");
+        let paths = AppPaths::rooted_at(dir.path().to_path_buf()).expect("temp paths");
+        TempPaths { paths, _dir: dir }
     }
 
     #[test]
@@ -665,6 +686,38 @@ mod tests {
         assert_eq!(parsed.equalizer.gains_db.len(), EQ_BAND_COUNT);
         assert_eq!(parsed.appearance.accent, original.appearance.accent);
         assert_eq!(parsed.playback.volume, original.playback.volume);
+    }
+
+    #[test]
+    fn a_failing_test_still_removes_its_scratch_directory() {
+        // The reason the guard exists. The helper this replaced deleted the
+        // *previous* run's directory on the way in, and the names carry a pid,
+        // so the previous run's name never matched and every run left one
+        // behind. A panicking test left one behind twice over.
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let inner = std::sync::Arc::clone(&seen);
+
+        // The panic is expected, so do not let it print a backtrace.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(move || {
+            let paths = temp_paths("panic");
+            *inner.lock().unwrap() = Some(paths.config_dir().to_path_buf());
+            panic!("as a failing assertion would");
+        });
+        std::panic::set_hook(hook);
+
+        assert!(result.is_err(), "the closure was supposed to panic");
+        let dir = seen
+            .lock()
+            .unwrap()
+            .take()
+            .expect("a directory was created");
+        assert!(
+            !dir.exists(),
+            "{} survived a panic and would have been left in the temp folder",
+            dir.display()
+        );
     }
 
     #[test]

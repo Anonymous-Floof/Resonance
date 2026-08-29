@@ -152,30 +152,31 @@ pub fn portable_root_beside(exe_dir: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "resonance-paths-{name}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A scratch directory that removes itself when the guard is dropped.
+    ///
+    /// Returned rather than a bare path so that a panicking test still cleans
+    /// up. Callers use `dir.path()`.
+    fn temp_dir(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("resonance-paths-{name}-"))
+            .tempdir()
+            .unwrap()
     }
 
     #[test]
     fn without_the_marker_there_is_no_portable_root() {
-        let dir = temp_dir("plain");
-        assert_eq!(portable_root_beside(&dir), None);
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = temp_dir("plain");
+        let dir = scratch.path();
+        assert_eq!(portable_root_beside(dir), None);
     }
 
     #[test]
     fn the_marker_moves_everything_beside_the_executable() {
-        let dir = temp_dir("portable");
+        let scratch = temp_dir("portable");
+        let dir = scratch.path();
         std::fs::write(dir.join(PORTABLE_MARKER), b"").unwrap();
 
-        let root = portable_root_beside(&dir).expect("the marker should switch it on");
+        let root = portable_root_beside(dir).expect("the marker should switch it on");
         assert_eq!(root, dir.join(PORTABLE_DIR));
 
         // And every directory really does land under it, rather than the
@@ -193,8 +194,6 @@ mod tests {
                 path.display()
             );
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A *directory* of that name is not the marker. The check is deliberately
@@ -202,22 +201,21 @@ mod tests {
     /// get a second, empty library.
     #[test]
     fn a_directory_named_like_the_marker_does_not_count() {
-        let dir = temp_dir("marker-dir");
+        let scratch = temp_dir("marker-dir");
+        let dir = scratch.path();
         std::fs::create_dir_all(dir.join(PORTABLE_MARKER)).unwrap();
 
-        assert_eq!(portable_root_beside(&dir), None);
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(portable_root_beside(dir), None);
     }
 
     #[test]
     fn rooted_paths_are_all_under_their_root() {
-        let dir = temp_dir("rooted");
-        let paths = AppPaths::rooted_at(&dir).unwrap();
+        let scratch = temp_dir("rooted");
+        let dir = scratch.path();
+        let paths = AppPaths::rooted_at(dir).unwrap();
 
-        assert!(paths.config_dir().starts_with(&dir));
-        assert!(paths.data_dir().starts_with(&dir));
-        assert!(paths.cache_dir().starts_with(&dir));
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(paths.config_dir().starts_with(dir));
+        assert!(paths.data_dir().starts_with(dir));
+        assert!(paths.cache_dir().starts_with(dir));
     }
 }

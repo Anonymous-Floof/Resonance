@@ -133,10 +133,13 @@ mod tests {
     use std::fs;
 
     /// Build a small folder tree in a unique temporary directory.
-    fn fixture(name: &str, files: &[&str]) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("resonance-scan-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+    /// A scratch tree that removes itself when the guard is dropped.
+    fn fixture(name: &str, files: &[&str]) -> tempfile::TempDir {
+        let guard = tempfile::Builder::new()
+            .prefix(&format!("resonance-scan-{name}-"))
+            .tempdir()
+            .expect("temp dir");
+        let root = guard.path();
 
         for relative in files {
             let path = root.join(relative);
@@ -146,28 +149,28 @@ mod tests {
             fs::write(&path, b"not really audio").expect("writing a fixture file");
         }
 
-        root
+        guard
     }
 
     #[test]
     fn finds_playable_files_recursively() {
-        let root = fixture(
+        let scratch = fixture(
             "recursive",
             &["a.mp3", "album/b.flac", "album/deep/c.wav", "notes.txt"],
         );
+        let root = scratch.path().to_path_buf();
 
         let result = scan(std::slice::from_ref(&root));
 
         assert_eq!(result.tracks.len(), 3, "text files must not be picked up");
         assert!(result.tracks.iter().all(|p| p.starts_with(&root)));
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// The point of `rejected`: an unplayable file is reported, not dropped.
     #[test]
     fn unsupported_audio_is_reported_rather_than_ignored() {
-        let root = fixture("rejects", &["good.mp3", "mix.opus"]);
+        let scratch = fixture("rejects", &["good.mp3", "mix.opus"]);
+        let root = scratch.path().to_path_buf();
 
         let result = scan(std::slice::from_ref(&root));
 
@@ -175,28 +178,26 @@ mod tests {
         assert_eq!(result.rejected.len(), 1);
         assert!(result.rejected[0].path.ends_with("mix.opus"));
         assert!(result.rejected[0].reason.contains("Opus"));
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn hidden_and_cache_folders_are_skipped() {
-        let root = fixture(
+        let scratch = fixture(
             "hidden",
             &["real.mp3", ".thumbnails/thumb.mp3", "__MACOSX/junk.mp3"],
         );
+        let root = scratch.path().to_path_buf();
 
         let result = scan(std::slice::from_ref(&root));
 
         assert_eq!(result.tracks.len(), 1);
         assert!(result.tracks[0].ends_with("real.mp3"));
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn results_are_sorted_and_deduplicated() {
-        let root = fixture("dupes", &["b.mp3", "a.mp3"]);
+        let scratch = fixture("dupes", &["b.mp3", "a.mp3"]);
+        let root = scratch.path().to_path_buf();
 
         // The same root twice must not yield each track twice.
         let result = scan(&[root.clone(), root.clone()]);
@@ -204,8 +205,6 @@ mod tests {
         assert_eq!(result.tracks.len(), 2);
         assert!(result.tracks[0].ends_with("a.mp3"));
         assert!(result.tracks[1].ends_with("b.mp3"));
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -12,7 +12,7 @@
 //! runs SQLite's cleanup and rolls the transaction back tidily, which is the
 //! opposite of what is being tested.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use mp_core::library::Library;
@@ -65,7 +65,8 @@ fn a_crash_mid_write_leaves_the_library_intact() {
         return;
     }
 
-    let dir = temp_dir("wal-crash");
+    let scratch = temp_dir("wal-crash");
+    let dir = scratch.path();
     let db = dir.join("library.db");
 
     let status = Command::new(std::env::current_exe().expect("the test binary's own path"))
@@ -107,7 +108,7 @@ fn a_crash_mid_write_leaves_the_library_intact() {
     // And the index is not merely readable — it still takes writes.
     insert(library.connection(), 9_999);
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A library closed properly should leave nothing to replay.
@@ -117,7 +118,8 @@ fn a_crash_mid_write_leaves_the_library_intact() {
 /// naive copy would leave behind.
 #[test]
 fn a_checkpoint_folds_the_log_back_into_the_file() {
-    let dir = temp_dir("wal-checkpoint");
+    let scratch = temp_dir("wal-checkpoint");
+    let dir = scratch.path();
     let db = dir.join("library.db");
 
     {
@@ -151,7 +153,7 @@ fn a_checkpoint_folds_the_log_back_into_the_file() {
         .unwrap();
     assert_eq!(count as usize, COMMITTED);
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// One track row, with only the columns the schema insists on.
@@ -173,13 +175,10 @@ fn insert(connection: &rusqlite::Connection, index: usize) {
         .expect("the insert should succeed");
 }
 
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "resonance-{name}-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A scratch directory that removes itself when the guard is dropped.
+fn temp_dir(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("resonance-{name}-"))
+        .tempdir()
+        .unwrap()
 }

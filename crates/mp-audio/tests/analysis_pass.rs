@@ -14,12 +14,16 @@ use rusqlite::params;
 
 const RATE: u32 = 44_100;
 
-fn scratch(name: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("resonance-analysis-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A scratch directory that removes itself when the guard is dropped.
+///
+/// Returned rather than a bare path so that a failing assertion cleans up too:
+/// the names carry a pid, so a directory left behind by one run is never
+/// reused by the next, it just accumulates. Callers use `.path()`.
+fn scratch(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("resonance-analysis-{name}-"))
+        .tempdir()
+        .unwrap()
 }
 
 /// Write a mono 16-bit WAV.
@@ -82,7 +86,8 @@ fn index_with(files: &[(i64, PathBuf)]) -> db::Handle {
 
 #[test]
 fn the_pass_analyses_real_files_and_empties_the_queue() {
-    let dir = scratch("basic");
+    let scratch_dir = scratch("basic");
+    let dir = scratch_dir.path();
 
     let files: Vec<(i64, PathBuf)> = (1..=3)
         .map(|id| {
@@ -106,13 +111,14 @@ fn the_pass_analyses_real_files_and_empties_the_queue() {
 
     assert_eq!(features::progress(&connection).unwrap(), (3, 3));
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// The results have to describe the actual audio, not just be present.
 #[test]
 fn what_is_stored_describes_the_file_that_was_read() {
-    let dir = scratch("meaning");
+    let scratch_dir = scratch("meaning");
+    let dir = scratch_dir.path();
 
     let low = dir.join("low.wav");
     let high = dir.join("high.wav");
@@ -133,13 +139,14 @@ fn what_is_stored_describes_the_file_that_was_read() {
     );
     assert!(low.bass > high.bass);
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Stopping halfway must lose nothing and pick up where it left off.
 #[test]
 fn the_pass_is_resumable() {
-    let dir = scratch("resume");
+    let scratch_dir = scratch("resume");
+    let dir = scratch_dir.path();
 
     let files: Vec<(i64, PathBuf)> = (1..=5)
         .map(|id| {
@@ -172,12 +179,13 @@ fn the_pass_is_resumable() {
     let fourth = analysis::run_batch(&connection, 10, &cancel).unwrap();
     assert_eq!(fourth.analysed, 0);
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn cancelling_stops_the_batch_without_losing_what_was_done() {
-    let dir = scratch("cancel");
+    let scratch_dir = scratch("cancel");
+    let dir = scratch_dir.path();
 
     let files: Vec<(i64, PathBuf)> = (1..=4)
         .map(|id| {
@@ -199,13 +207,14 @@ fn cancelling_stops_the_batch_without_losing_what_was_done() {
         "the queue was disturbed by a cancelled run"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// One unreadable file must not be retried on every pass forever.
 #[test]
 fn a_file_that_will_not_decode_leaves_the_queue() {
-    let dir = scratch("broken");
+    let scratch_dir = scratch("broken");
+    let dir = scratch_dir.path();
 
     let good = dir.join("good.wav");
     write_wav(&good, &tone(440.0, 3.0));
@@ -229,13 +238,14 @@ fn a_file_that_will_not_decode_leaves_the_queue() {
     assert_eq!(again.analysed, 0);
     assert_eq!(again.failed, 0);
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A re-encoded file has to be measured again.
 #[test]
 fn a_changed_file_comes_back_to_the_queue() {
-    let dir = scratch("changed");
+    let scratch_dir = scratch("changed");
+    let dir = scratch_dir.path();
 
     let path = dir.join("a.wav");
     write_wav(&path, &tone(100.0, 3.0));
@@ -268,7 +278,7 @@ fn a_changed_file_comes_back_to_the_queue() {
         after.centroid
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// An empty library is not an error.

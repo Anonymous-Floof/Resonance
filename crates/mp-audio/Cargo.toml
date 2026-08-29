@@ -19,5 +19,6 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 # The analysis-pass test needs to build an index to write results into.
 rusqlite.workspace = true

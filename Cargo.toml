@@ -63,6 +63,11 @@ windows = { version = "0.62", features = [
 ] }
 
 # --- infra ---
+# Dev-only. Tests scribble into the system temp directory, and a directory that
+# is only removed at the *start* of the next run is a directory that outlives
+# every run: the names carry a pid, so the next run never matches the last
+# one's. `TempDir` removes itself on drop, panicking tests included.
+tempfile = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"

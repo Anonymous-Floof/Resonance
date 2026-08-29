@@ -7,7 +7,7 @@
 //! scan, which is miserable to diagnose after the fact and trivial to catch
 //! here.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,13 +19,13 @@ use mp_core::library::{Filter, Library, Order, Progress, ScanOptions};
 /// shows up as hundreds of milliseconds or a hard stall, not as jitter.
 const MAX_READ: Duration = Duration::from_millis(750);
 
-fn fixture(name: &str, count: usize) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "resonance-concurrent-{name}-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+/// A scratch tree that removes itself when the guard is dropped.
+fn fixture(name: &str, count: usize) -> tempfile::TempDir {
+    let guard = tempfile::Builder::new()
+        .prefix(&format!("resonance-concurrent-{name}-"))
+        .tempdir()
+        .unwrap();
+    let root = guard.path();
 
     for index in 0..count {
         // Spread across folders so the folder view has something to group.
@@ -38,7 +38,7 @@ fn fixture(name: &str, count: usize) -> PathBuf {
         .unwrap();
     }
 
-    root
+    guard
 }
 
 fn options(root: &Path) -> ScanOptions {
@@ -52,17 +52,20 @@ fn options(root: &Path) -> ScanOptions {
 
 #[test]
 fn the_ui_can_keep_reading_while_a_scan_writes() {
-    let root = fixture("reads", 1_200);
-    let dir = root
-        .parent()
-        .unwrap()
-        .join(format!("resonance-concurrent-db-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch_root = fixture("reads", 1_200);
+    let root = scratch_root.path();
+    // Its own guard rather than a sibling path built by hand: the sibling was
+    // never anybody's to delete, so nobody did.
+    let scratch_db = tempfile::Builder::new()
+        .prefix("resonance-concurrent-db-")
+        .tempdir()
+        .unwrap();
+    let dir = scratch_db.path();
 
     let library = Library::open_at(dir.join("library.db"), dir.join("art")).unwrap();
 
     let scanner = library
-        .detached_scanner(options(&root))
+        .detached_scanner(options(root))
         .expect("a file-backed library must be able to detach a scanner");
 
     let progress = Arc::new(Progress::new());
@@ -116,23 +119,24 @@ fn the_ui_can_keep_reading_while_a_scan_writes() {
         "the reading connection must see the scan's commit"
     );
 
-    let _ = std::fs::remove_dir_all(&root);
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Cancelling has to actually stop the worker, not merely set a flag that
 /// nothing reads until the scan would have finished anyway.
 #[test]
 fn a_cancelled_scan_stops_promptly() {
-    let root = fixture("cancel", 4_000);
-    let dir = root.parent().unwrap().join(format!(
-        "resonance-concurrent-cancel-db-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch_root = fixture("cancel", 4_000);
+    let root = scratch_root.path();
+    let scratch_db = tempfile::Builder::new()
+        .prefix("resonance-concurrent-cancel-db-")
+        .tempdir()
+        .unwrap();
+    let dir = scratch_db.path();
 
     let library = Library::open_at(dir.join("library.db"), dir.join("art")).unwrap();
-    let scanner = library.detached_scanner(options(&root)).unwrap();
+    let scanner = library.detached_scanner(options(root)).unwrap();
 
     let progress = Arc::new(Progress::new());
     let worker_progress = Arc::clone(&progress);
@@ -150,6 +154,6 @@ fn a_cancelled_scan_stops_promptly() {
         started.elapsed()
     );
 
-    let _ = std::fs::remove_dir_all(&root);
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(dir);
 }

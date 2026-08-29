@@ -10,7 +10,7 @@
 //! dropped or duplicated block, which is exactly the failure being looked for.
 
 use std::f64::consts::PI;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use mp_audio::decode::TrackDecoder;
 use mp_audio::resample::Resampler;
@@ -23,11 +23,16 @@ const FREQ: f64 = 440.0;
 const SPLIT_AT: usize = 11_000;
 const TOTAL_FRAMES: usize = 22_050;
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("resonance-gapless-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A scratch directory that removes itself when the guard is dropped.
+///
+/// Returned rather than a bare path so that a failing assertion cleans up too:
+/// the names carry a pid, so a directory left behind by one run is never
+/// reused by the next, it just accumulates. Callers use `.path()`.
+fn scratch(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("resonance-gapless-{name}-"))
+        .tempdir()
+        .unwrap()
 }
 
 /// The reference waveform: one continuous sine.
@@ -113,7 +118,8 @@ fn largest_step(samples: &[f32]) -> f32 {
 
 #[test]
 fn two_halves_of_a_split_track_rejoin_without_a_discontinuity() {
-    let dir = scratch("split");
+    let scratch_dir = scratch("split");
+    let dir = scratch_dir.path();
     let reference = reference();
 
     let first = dir.join("half-a.wav");
@@ -148,14 +154,15 @@ fn two_halves_of_a_split_track_rejoin_without_a_discontinuity() {
          waveform — that is a click"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// The reconstruction has to be the *same* audio, not merely smooth: dropping
 /// or duplicating a block could still look continuous.
 #[test]
 fn the_rejoined_halves_reproduce_the_original_waveform() {
-    let dir = scratch("reconstruct");
+    let scratch_dir = scratch("reconstruct");
+    let dir = scratch_dir.path();
     let reference = reference();
 
     let first = dir.join("half-a.wav");
@@ -186,14 +193,15 @@ fn the_rejoined_halves_reproduce_the_original_waveform() {
          beyond the {tolerance} that quantisation explains"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// The seam has to survive resampling too — this collection plays at 96 kHz
 /// from 44.1 kHz sources, so the boundary is never on a whole-sample tick.
 #[test]
 fn the_seam_survives_sample_rate_conversion() {
-    let dir = scratch("resampled");
+    let scratch_dir = scratch("resampled");
+    let dir = scratch_dir.path();
     let reference = reference();
 
     let first = dir.join("half-a.wav");
@@ -221,5 +229,5 @@ fn the_seam_survives_sample_rate_conversion() {
          {natural:.5}"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }

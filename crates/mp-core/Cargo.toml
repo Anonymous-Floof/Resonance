@@ -24,4 +24,5 @@ image.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 zip = { version = "7", default-features = false, features = ["deflate-flate2"] }

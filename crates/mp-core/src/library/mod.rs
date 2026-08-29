@@ -926,15 +926,13 @@ mod tests {
     /// conjure, so these exercise the index through its own API using files
     /// that are only recognised by extension. Tag reading is covered by the
     /// `library_probe` example against the real collection.
-    fn fixture(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "resonance-lib-{name}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        root
+    /// A scratch directory that removes itself when the guard is dropped, so a
+    /// failing assertion does not leave one behind. Callers use `.path()`.
+    fn fixture(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("resonance-lib-{name}-"))
+            .tempdir()
+            .unwrap()
     }
 
     fn write_files(root: &Path, names: &[&str]) {
@@ -964,12 +962,13 @@ mod tests {
     /// export is decorative.
     #[test]
     fn a_playlist_round_trips_through_an_m3u_file() {
-        let root = fixture("m3u-roundtrip");
-        write_files(&root, &["a.mp3", "deep/b.flac", "c.mp3"]);
+        let scratch_root = fixture("m3u-roundtrip");
+        let root = scratch_root.path();
+        write_files(root, &["a.mp3", "deep/b.flac", "c.mp3"]);
 
         let mut library = Library::in_memory().unwrap();
         library
-            .scan_blocking(&options(&root), &Progress::new())
+            .scan_blocking(&options(root), &Progress::new())
             .unwrap();
 
         let mut tracks: Vec<TrackId> = library
@@ -1004,19 +1003,20 @@ mod tests {
 
         assert_eq!(imported, tracks, "the same tracks should come back");
 
-        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(root);
     }
 
     /// An exported playlist must be portable, which means the paths in it are
     /// relative to the file itself wherever they can be.
     #[test]
     fn an_exported_playlist_uses_relative_paths() {
-        let root = fixture("m3u-relative");
-        write_files(&root, &["deep/b.flac"]);
+        let scratch_root = fixture("m3u-relative");
+        let root = scratch_root.path();
+        write_files(root, &["deep/b.flac"]);
 
         let mut library = Library::in_memory().unwrap();
         library
-            .scan_blocking(&options(&root), &Progress::new())
+            .scan_blocking(&options(root), &Progress::new())
             .unwrap();
 
         let tracks: Vec<TrackId> = library
@@ -1039,18 +1039,19 @@ mod tests {
             "the absolute root leaked into the file:\n{text}"
         );
 
-        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(root);
     }
 
     /// Tracks the index has never seen are reported, not quietly dropped.
     #[test]
     fn importing_reports_what_it_could_not_find() {
-        let root = fixture("m3u-missing");
-        write_files(&root, &["here.mp3"]);
+        let scratch_root = fixture("m3u-missing");
+        let root = scratch_root.path();
+        write_files(root, &["here.mp3"]);
 
         let mut library = Library::in_memory().unwrap();
         library
-            .scan_blocking(&options(&root), &Progress::new())
+            .scan_blocking(&options(root), &Progress::new())
             .unwrap();
 
         let file = root.join("Partial.m3u8");
@@ -1073,19 +1074,20 @@ mod tests {
             report.summary()
         );
 
-        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(root);
     }
 
     /// A playlist another program wrote spells the path differently. Matching
     /// on the filename is what rescues those.
     #[test]
     fn a_foreign_path_still_matches_by_filename() {
-        let root = fixture("m3u-foreign");
-        write_files(&root, &["deep/unique-name.mp3"]);
+        let scratch_root = fixture("m3u-foreign");
+        let root = scratch_root.path();
+        write_files(root, &["deep/unique-name.mp3"]);
 
         let mut library = Library::in_memory().unwrap();
         library
-            .scan_blocking(&options(&root), &Progress::new())
+            .scan_blocking(&options(root), &Progress::new())
             .unwrap();
 
         let file = root.join("Foreign.m3u8");
@@ -1096,19 +1098,20 @@ mod tests {
         assert_eq!(report.added, 1, "the filename should have matched");
         assert!(report.missing.is_empty());
 
-        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(root);
     }
 
     /// But an ambiguous filename must not be guessed at — putting the wrong
     /// song in the playlist is worse than reporting it missing.
     #[test]
     fn an_ambiguous_filename_is_not_guessed() {
-        let root = fixture("m3u-ambiguous");
-        write_files(&root, &["one/same.mp3", "two/same.mp3"]);
+        let scratch_root = fixture("m3u-ambiguous");
+        let root = scratch_root.path();
+        write_files(root, &["one/same.mp3", "two/same.mp3"]);
 
         let mut library = Library::in_memory().unwrap();
         library
-            .scan_blocking(&options(&root), &Progress::new())
+            .scan_blocking(&options(root), &Progress::new())
             .unwrap();
 
         let file = root.join("Ambiguous.m3u8");
@@ -1119,20 +1122,21 @@ mod tests {
         assert_eq!(report.added, 0);
         assert_eq!(report.missing.len(), 1);
 
-        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn a_scan_indexes_what_it_finds_and_ignores_what_it_should() {
-        let root = fixture("basic");
+        let scratch_root = fixture("basic");
+        let root = scratch_root.path();
         write_files(
-            &root,
+            root,
             &["a.mp3", "sub/b.flac", "notes.txt", "unsupported.opus"],
         );
 
         let mut library = Library::in_memory().unwrap();
         let progress = Progress::new();
-        let summary = library.scan_blocking(&options(&root), &progress).unwrap();
+        let summary = library.scan_blocking(&options(root), &progress).unwrap();
 
         assert_eq!(summary.added, 2, "two playable files");
         assert_eq!(summary.unplayable, 1, "the opus file is reported, not lost");
@@ -1141,22 +1145,23 @@ mod tests {
         assert_eq!(stats.tracks, 2);
         assert_eq!(stats.unplayable, 1);
 
-        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(root);
     }
 
     /// The property the whole fingerprint scheme exists for.
     #[test]
     fn rescanning_an_unchanged_library_reads_nothing() {
-        let root = fixture("incremental");
-        write_files(&root, &["a.mp3", "b.mp3", "c.mp3"]);
+        let scratch_root = fixture("incremental");
+        let root = scratch_root.path();
+        write_files(root, &["a.mp3", "b.mp3", "c.mp3"]);
 
         let mut library = Library::in_memory().unwrap();
         let progress = Progress::new();
 
-        let first = library.scan_blocking(&options(&root), &progress).unwrap();
+        let first = library.scan_blocking(&options(root), &progress).unwrap();
         assert_eq!(first.added, 3);
 
-        let second = library.scan_blocking(&options(&root), &progress).unwrap();
+        let second = library.scan_blocking(&options(root), &progress).unwrap();
         assert_eq!(second.added, 0);
         assert_eq!(second.updated, 0);
         assert_eq!(
@@ -1165,42 +1170,44 @@ mod tests {
         );
         assert!(!second.changed_anything());
 
-        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn a_deleted_file_leaves_the_library() {
-        let root = fixture("deletion");
-        write_files(&root, &["keep.mp3", "gone.mp3"]);
+        let scratch_root = fixture("deletion");
+        let root = scratch_root.path();
+        write_files(root, &["keep.mp3", "gone.mp3"]);
 
         let mut library = Library::in_memory().unwrap();
         let progress = Progress::new();
-        library.scan_blocking(&options(&root), &progress).unwrap();
+        library.scan_blocking(&options(root), &progress).unwrap();
         assert_eq!(library.stats().unwrap().tracks, 2);
 
         fs::remove_file(root.join("gone.mp3")).unwrap();
-        let summary = library.scan_blocking(&options(&root), &progress).unwrap();
+        let summary = library.scan_blocking(&options(root), &progress).unwrap();
 
         assert_eq!(summary.removed, 1);
         assert_eq!(library.stats().unwrap().tracks, 1);
 
-        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(root);
     }
 
     /// An unplugged drive must not be mistaken for a deleted library.
     #[test]
     fn an_unavailable_folder_does_not_delete_its_tracks() {
-        let root = fixture("offline");
-        write_files(&root, &["a.mp3", "b.mp3"]);
+        let scratch_root = fixture("offline");
+        let root = scratch_root.path();
+        write_files(root, &["a.mp3", "b.mp3"]);
 
         let mut library = Library::in_memory().unwrap();
         let progress = Progress::new();
-        library.scan_blocking(&options(&root), &progress).unwrap();
+        library.scan_blocking(&options(root), &progress).unwrap();
         assert_eq!(library.stats().unwrap().tracks, 2);
 
         // Simulate the drive going away: the root no longer resolves.
-        let _ = fs::remove_dir_all(&root);
-        let summary = library.scan_blocking(&options(&root), &progress).unwrap();
+        let _ = fs::remove_dir_all(root);
+        let summary = library.scan_blocking(&options(root), &progress).unwrap();
 
         assert_eq!(summary.removed, 0, "an offline root must not prune");
         assert_eq!(summary.unreadable, 1);
@@ -1209,15 +1216,16 @@ mod tests {
 
     #[test]
     fn untagged_files_still_get_a_readable_title() {
-        let root = fixture("names");
+        let scratch_root = fixture("names");
+        let root = scratch_root.path();
         write_files(
-            &root,
+            root,
             &["Bitter Compass - Under Streetlights (Official Video) [aB3dEfGhIjK].mp3"],
         );
 
         let mut library = Library::in_memory().unwrap();
         let progress = Progress::new();
-        library.scan_blocking(&options(&root), &progress).unwrap();
+        library.scan_blocking(&options(root), &progress).unwrap();
 
         let tracks = library.tracks(&Filter::All, Order::Title, false).unwrap();
         assert_eq!(tracks.len(), 1);
@@ -1225,59 +1233,63 @@ mod tests {
         assert_eq!(tracks[0].artist, "Bitter Compass");
         assert!(!tracks[0].tagged, "the metadata came from the filename");
 
-        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn search_finds_tracks_by_any_field() {
-        let root = fixture("search");
+        let scratch_root = fixture("search");
+        let root = scratch_root.path();
         write_files(
-            &root,
+            root,
             &["Vellichor - Paper Lantern.mp3", "Someone - Other.mp3"],
         );
 
         let mut library = Library::in_memory().unwrap();
         let progress = Progress::new();
-        library.scan_blocking(&options(&root), &progress).unwrap();
+        library.scan_blocking(&options(root), &progress).unwrap();
 
         assert_eq!(library.search("paper", None).unwrap().len(), 1);
         assert_eq!(library.search("velli", None).unwrap().len(), 1);
         assert_eq!(library.search("nothing here", None).unwrap().len(), 0);
 
-        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn folders_are_grouped_with_their_counts() {
-        let root = fixture("folders");
-        write_files(&root, &["loose.mp3", "Calming/a.mp3", "Calming/b.mp3"]);
+        let scratch_root = fixture("folders");
+        let root = scratch_root.path();
+        write_files(root, &["loose.mp3", "Calming/a.mp3", "Calming/b.mp3"]);
 
         let mut library = Library::in_memory().unwrap();
         let progress = Progress::new();
-        library.scan_blocking(&options(&root), &progress).unwrap();
+        library.scan_blocking(&options(root), &progress).unwrap();
 
         let folders = library.folders().unwrap();
         assert_eq!(folders.len(), 2);
         let calming = folders.iter().find(|f| f.name == "Calming").unwrap();
         assert_eq!(calming.track_count, 2);
 
-        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(root);
     }
 
     /// Removing a watched folder from the config must not leave its tracks
     /// behind as unplayable ghosts.
     #[test]
     fn dropping_a_root_removes_its_tracks() {
-        let first = fixture("root-a");
-        let second = fixture("root-b");
-        write_files(&first, &["a.mp3"]);
-        write_files(&second, &["b.mp3"]);
+        let scratch_first = fixture("root-a");
+        let first = scratch_first.path();
+        let scratch_second = fixture("root-b");
+        let second = scratch_second.path();
+        write_files(first, &["a.mp3"]);
+        write_files(second, &["b.mp3"]);
 
         let mut library = Library::in_memory().unwrap();
         let progress = Progress::new();
 
         let both = ScanOptions {
-            roots: vec![first.clone(), second.clone()],
+            roots: vec![first.to_path_buf(), second.to_path_buf()],
             min_duration: std::time::Duration::ZERO,
             extract_art: false,
             ..ScanOptions::default()
@@ -1285,29 +1297,30 @@ mod tests {
         library.scan_blocking(&both, &progress).unwrap();
         assert_eq!(library.stats().unwrap().tracks, 2);
 
-        library.scan_blocking(&options(&first), &progress).unwrap();
+        library.scan_blocking(&options(first), &progress).unwrap();
         assert_eq!(library.stats().unwrap().tracks, 1);
 
-        let _ = fs::remove_dir_all(&first);
-        let _ = fs::remove_dir_all(&second);
+        let _ = fs::remove_dir_all(first);
+        let _ = fs::remove_dir_all(second);
     }
 
     /// Cancelling has to leave the library exactly as it was, not half-written.
     #[test]
     fn a_cancelled_scan_writes_nothing() {
-        let root = fixture("cancel");
-        write_files(&root, &["a.mp3", "b.mp3"]);
+        let scratch_root = fixture("cancel");
+        let root = scratch_root.path();
+        write_files(root, &["a.mp3", "b.mp3"]);
 
         let mut library = Library::in_memory().unwrap();
         let progress = Progress::new();
         progress.cancel();
 
-        let summary = library.scan_blocking(&options(&root), &progress).unwrap();
+        let summary = library.scan_blocking(&options(root), &progress).unwrap();
 
         assert!(summary.cancelled);
         assert_eq!(summary.added, 0);
         assert_eq!(library.stats().unwrap().tracks, 0);
 
-        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(root);
     }
 }

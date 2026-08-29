@@ -416,13 +416,11 @@ mod tests {
 
     #[test]
     fn a_sidecar_is_found_beside_the_track() {
-        let dir = std::env::temp_dir().join(format!(
-            "resonance-lyrics-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = tempfile::Builder::new()
+            .prefix("resonance-lyrics-")
+            .tempdir()
+            .unwrap();
+        let dir = scratch.path();
 
         let track = dir.join("Song.mp3");
         std::fs::write(&track, b"not really audio").unwrap();
@@ -431,29 +429,23 @@ mod tests {
         let lyrics = sidecar_for(&track).expect("the sidecar is right there");
         assert_eq!(lyrics.lines[0].text, "Found me");
         assert!(matches!(lyrics.source, Source::Sidecar(_)));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A `.txt` only counts when its name matches the track exactly, so a
     /// `readme.txt` in the folder is not mistaken for the words to a song.
     #[test]
     fn an_unrelated_text_file_is_not_treated_as_lyrics() {
-        let dir = std::env::temp_dir().join(format!(
-            "resonance-lyrics-txt-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = tempfile::Builder::new()
+            .prefix("resonance-lyrics-txt-")
+            .tempdir()
+            .unwrap();
+        let dir = scratch.path();
 
         let track = dir.join("Song.mp3");
         std::fs::write(&track, b"not really audio").unwrap();
         std::fs::write(dir.join("readme.txt"), "buy our album").unwrap();
 
         assert!(sidecar_for(&track).is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
