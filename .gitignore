@@ -39,6 +39,13 @@ config.v*.bak.toml
 *.png
 *.html
 !/docs/**
+# The application icon is a source asset, not probe output. `src/main.rs`
+# embeds icon.png with `include_bytes!`, so without this exception a fresh
+# clone does not build.
+!/assets/*.png
+
+# Byte-code from the icon generator.
+__pycache__/
 
 # Editors and OS clutter.
 .vscode/

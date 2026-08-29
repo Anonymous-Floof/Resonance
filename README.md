@@ -252,10 +252,25 @@ several minutes slower to build:
 cargo build --profile dist
 ```
 
+The Windows icon and version block are compiled in by `build.rs`, which needs
+`rc.exe` from the Windows SDK. If it is missing the build still succeeds and
+prints a warning — you get a working binary with the generic Windows icon.
+
+The icon itself is generated rather than drawn, so that each size can be tuned
+for the pixels it actually has: the 16px version drops two rings and two bars
+that would otherwise become a smudge. `assets/icon.ico` and `assets/icon.png`
+are committed, so this only needs running if the design changes:
+
+```bash
+python assets/make_icon.py assets
+```
+
 ## Project layout
 
 ```
 src/main.rs          thin launcher: paths, logging, config, hand off to the UI
+build.rs             compiles the icon and version block into the executable
+assets/              the application icon, and the script that generates it
 crates/
 ├── mp-core/         settings, paths, colour, and the library:
 │                    schema, scanner, queries, playlists, similarity, tags

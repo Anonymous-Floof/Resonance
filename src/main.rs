@@ -49,6 +49,11 @@ fn main() -> Result<()> {
         .with_app_id("resonance")
         .with_decorations(false);
 
+    let viewport = match window_icon() {
+        Some(icon) => viewport.with_icon(icon),
+        None => viewport,
+    };
+
     let options = eframe::NativeOptions {
         viewport,
         // The config file is the source of truth for settings, so eframe's own
@@ -66,6 +71,29 @@ fn main() -> Result<()> {
     .context("running the application")?;
 
     Ok(())
+}
+
+/// The icon shown in the taskbar and the Alt-Tab switcher.
+///
+/// Separate from the icon `build.rs` compiles into the executable, which is
+/// what Explorer shows. Windows will fall back to that one if this is missing,
+/// but only after the window has already appeared without it.
+fn window_icon() -> Option<egui::IconData> {
+    let bytes = include_bytes!("../assets/icon.png");
+    let image = match image::load_from_memory(bytes) {
+        Ok(image) => image.into_rgba8(),
+        Err(err) => {
+            tracing::warn!("could not decode the window icon: {err}");
+            return None;
+        }
+    };
+
+    let (width, height) = image.dimensions();
+    Some(egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
 }
 
 /// Log to stderr and to a rolling file under the data directory.

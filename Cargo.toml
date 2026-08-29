@@ -80,6 +80,7 @@ tracing-appender = "0.2"
 [package]
 name = "resonance"
 description = "A modern, local-first music player"
+build = "build.rs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -98,6 +99,12 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 egui.workspace = true
 eframe.workspace = true
+# Decodes the window icon at startup. Already in the tree for cover art.
+image.workspace = true
+
+# Compiles `assets/icon.ico` and the version block into the executable.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [profile.dev]
 opt-level = 1
