@@ -47,17 +47,18 @@ want something better to play it with than what came with the operating system.
 - Finds duplicates by title and artist within a duration tolerance
 
 **Playback**
-- Gapless, with crossfade up to 12 seconds
+- Gapless, and crossfade up to 12 seconds with a linear or equal-power curve
 - Ten-band equalizer with presets, a limiter, and a live response curve you can
   drag directly
 - ReplayGain, per track or per album
 - Shuffle — off, true random, or smart shuffle that spaces out artists and
   avoids what you heard recently
-- Repeat, sleep timer, silence trimming, resume position on long tracks
+- Repeat, and a sleep timer by the clock or to the end of the track
+- Optional trimming of digital silence at the start and end of a track
 - **Queue panel** showing what is coming next in the order it will actually
   play, including under shuffle — jump to anything, drop anything, or clear it
 - Right-click any track for **Play next** or **Add to queue**
-- Output device picker and buffer size control
+- Output device picker and buffer size control, applied without a restart
 
 **Playlists**
 - Ordinary playlists, built by adding from your library or from suggestions
@@ -282,8 +283,8 @@ changed. Before trusting a clean result, `cargo clean` first.
 
 ## Diagnostic examples
 
-Six examples exist for things unit tests cannot reach. All are headless unless
-noted.
+Eight examples exist for things unit tests cannot reach. All are headless
+unless noted.
 
 **Something will not play, or plays wrong**
 
@@ -300,6 +301,21 @@ Drives the real engine — play, pause, seek, skip — and asserts the underrun
 counter stays at zero. **This one opens the output device and makes noise.**
 
 **Something is missing from the library**
+
+```bash
+cargo run --release -p mp-audio --example crossfade_check -- "C:\path	o\music" 4
+```
+Plays to a real track boundary and asserts a crossfade actually began. Whether
+a fade *sounds* right is a matter for ears, but whether one started at all is a
+fact, and the two are indistinguishable to a listener. Silent unless you pass
+`--audible`.
+
+```bash
+cargo run --release -p mp-audio --example silence_probe -- "C:\path	o\music"
+```
+Reports how much digital silence sits at each end of every file. Answers which
+of your tracks the trim setting will actually do anything to: most have none,
+and testing on one of those looks exactly like the feature being broken.
 
 ```bash
 cargo run --release -p mp-core --example library_probe -- "C:\path\to\music"
