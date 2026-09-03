@@ -294,7 +294,7 @@ rebuild the DSP.
 ## Tests
 
 ```bash
-cargo test --workspace          # 707 tests
+cargo test --workspace          # 713 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```
