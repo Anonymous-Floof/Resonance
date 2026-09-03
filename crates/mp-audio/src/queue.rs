@@ -67,6 +67,23 @@ pub struct QueueEntry {
     pub path: PathBuf,
 }
 
+/// Where the cursor lands after an entry moves from `from` to `to`.
+///
+/// The cursor addresses a *position*, not a track, so moving entries across it
+/// changes what it points at. Dragging the playing track carries the cursor
+/// with it; dragging anything else over the cursor shuffles it by one.
+fn shift_cursor(cursor: usize, from: usize, to: usize) -> usize {
+    if cursor == from {
+        to
+    } else if from < cursor && to >= cursor {
+        cursor - 1
+    } else if from > cursor && to <= cursor {
+        cursor + 1
+    } else {
+        cursor
+    }
+}
+
 /// An ordered list of tracks plus a cursor.
 pub struct Queue {
     /// Every track, in the order it was added.
@@ -373,6 +390,31 @@ impl Queue {
         true
     }
 
+    /// Move a queued track to a different place in the play order.
+    ///
+    /// Both positions are *within the play order* — what the queue panel shows
+    /// — rather than indices into `tracks`. Reordering is something the user
+    /// does to the list in front of them, and with shuffle on that list is a
+    /// permutation this type owns; making the caller translate would mean
+    /// giving it the permutation to translate through.
+    ///
+    /// `to` is where the entry ends up once it has been lifted out, which is
+    /// what `Vec::remove` followed by `Vec::insert` does.
+    pub fn reorder(&mut self, from: usize, to: usize) -> bool {
+        let len = self.order.len();
+        if from >= len || to >= len || from == to {
+            return false;
+        }
+
+        self.revision = self.revision.wrapping_add(1);
+
+        let entry = self.order.remove(from);
+        self.order.insert(to, entry);
+        self.cursor = shift_cursor(self.cursor, from, to);
+
+        true
+    }
+
     /// Jump to a specific track by its index into `tracks`.
     pub fn jump_to(&mut self, index: usize) -> Option<&Path> {
         let at = self.order.iter().position(|&i| i == index)?;
@@ -475,6 +517,92 @@ mod tests {
         let mut q = Queue::new();
         q.replace(paths(names), 0);
         q
+    }
+
+    /// The order as the panel would show it.
+    fn shown(q: &Queue) -> Vec<String> {
+        q.entries()
+            .iter()
+            .map(|e| e.path.display().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn reordering_moves_the_entry_to_the_requested_position() {
+        let mut q = queue_of(&["a", "b", "c", "d"]);
+
+        assert!(q.reorder(0, 2));
+
+        assert_eq!(shown(&q), ["b", "c", "a", "d"]);
+    }
+
+    #[test]
+    fn reordering_upwards_lands_where_asked_too() {
+        let mut q = queue_of(&["a", "b", "c", "d"]);
+
+        assert!(q.reorder(3, 1));
+
+        assert_eq!(shown(&q), ["a", "d", "b", "c"]);
+    }
+
+    #[test]
+    fn dragging_the_playing_track_carries_the_cursor_with_it() {
+        let mut q = queue_of(&["a", "b", "c", "d"]);
+        q.jump_to(0);
+        assert_eq!(q.current().unwrap().display().to_string(), "a");
+
+        q.reorder(0, 2);
+
+        assert_eq!(q.cursor(), 2);
+        assert_eq!(
+            q.current().unwrap().display().to_string(),
+            "a",
+            "the track playing must not change because the list moved"
+        );
+    }
+
+    /// The cursor addresses a position, so an entry crossing it shifts what it
+    /// points at. Getting this wrong silently changes the track that is
+    /// playing, which is the worst possible outcome for a drag.
+    #[test]
+    fn moving_an_entry_across_the_cursor_leaves_the_same_track_playing() {
+        let mut q = queue_of(&["a", "b", "c", "d"]);
+        q.jump_to(2);
+        assert_eq!(q.current().unwrap().display().to_string(), "c");
+
+        // From before the cursor to after it.
+        q.reorder(0, 3);
+        assert_eq!(q.current().unwrap().display().to_string(), "c");
+
+        // And back across, the other way.
+        q.reorder(3, 0);
+        assert_eq!(q.current().unwrap().display().to_string(), "c");
+    }
+
+    #[test]
+    fn a_reorder_that_changes_nothing_is_refused() {
+        let mut q = queue_of(&["a", "b", "c"]);
+        let before = q.revision();
+
+        assert!(!q.reorder(1, 1), "a move to the same place is not a move");
+        assert!(!q.reorder(0, 9), "off the end");
+        assert!(!q.reorder(9, 0));
+
+        assert_eq!(
+            q.revision(),
+            before,
+            "a refused reorder must not make the panel rebuild"
+        );
+    }
+
+    #[test]
+    fn reordering_bumps_the_revision_so_the_panel_rebuilds() {
+        let mut q = queue_of(&["a", "b", "c"]);
+        let before = q.revision();
+
+        assert!(q.reorder(0, 2));
+
+        assert_ne!(q.revision(), before);
     }
 
     #[test]

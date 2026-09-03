@@ -11,6 +11,7 @@
 use std::time::Duration;
 
 use egui::{Sense, TextStyle, Ui};
+use mp_core::library::model::{AlbumId, ArtistId};
 
 use crate::theme::{Theme, col, col_alpha};
 use crate::widgets;
@@ -33,8 +34,54 @@ pub struct Row {
     /// The engine-side index, which is what jumping and removing take.
     pub index: usize,
     pub title: String,
-    pub subtitle: String,
+    /// Kept apart rather than pre-joined into one subtitle: each half is its
+    /// own navigation target, so each needs its own rectangle to be hit.
+    pub artist: String,
+    pub album: Option<String>,
+    pub artist_id: Option<ArtistId>,
+    pub album_id: Option<AlbumId>,
     pub duration: Option<Duration>,
+}
+
+/// The separator between the two halves of the second line.
+const SEPARATOR: &str = " — ";
+
+impl Row {
+    /// Whether there is a second line to draw at all.
+    fn has_subtitle(&self) -> bool {
+        !self.artist.is_empty() || self.album.is_some()
+    }
+}
+
+/// Where the in-progress drag is remembered between frames.
+///
+/// egui memory rather than a field on the caller: the panel is drawn from a
+/// plain function, and a drag is transient interaction state that means
+/// nothing once the pointer is released.
+fn drag_id() -> egui::Id {
+    egui::Id::new("queue-drag-from")
+}
+
+fn dragging_from(ctx: &egui::Context) -> Option<usize> {
+    ctx.data(|d| d.get_temp::<usize>(drag_id()))
+}
+
+fn set_dragging(ctx: &egui::Context, from: Option<usize>) {
+    ctx.data_mut(|d| match from {
+        Some(position) => {
+            d.insert_temp(drag_id(), position);
+        }
+        None => {
+            d.remove_temp::<usize>(drag_id());
+        }
+    });
+}
+
+/// Which half of the second line the pointer is over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Link {
+    Artist,
+    Album,
 }
 
 /// What the user did in the panel this frame.
@@ -48,6 +95,16 @@ pub struct Outcome {
     pub clear: bool,
     /// Close the panel.
     pub close: bool,
+    /// Open this artist in the library.
+    pub open_artist: Option<(ArtistId, String)>,
+    /// Open this album in the library, as `(id, title, artist)`.
+    pub open_album: Option<(AlbumId, String, String)>,
+    /// Move an entry within the play order, as `(from, to)`.
+    ///
+    /// Positions within the displayed order, not engine indices: reordering is
+    /// done to the list on screen, and the engine owns the permutation that
+    /// list came from.
+    pub reorder: Option<(usize, usize)>,
 }
 
 /// Draw the panel.
@@ -74,6 +131,14 @@ pub fn show(
     }
 
     let row_height = m.row_height * ROW_SCALE;
+    let dragging = dragging_from(ui.ctx());
+
+    // Read once, before the rows: while a drag is active egui gives the
+    // pointer to the dragged widget, so no other row will report a hover and
+    // the drop target has to be worked out from the raw position.
+    let pointer = ui.input(|i| i.pointer.interact_pos());
+    let released = ui.input(|i| i.pointer.any_released());
+    let mut drop_slot: Option<usize> = None;
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -86,10 +151,72 @@ pub fn show(
                 let played = cursor.is_some_and(|cursor| position < cursor);
                 let is_current = cursor == Some(position);
 
-                let hit = entry_row(ui, theme, row, position, is_current, played, row_height);
+                let hit = entry_row(
+                    ui,
+                    theme,
+                    row,
+                    position,
+                    is_current,
+                    played,
+                    row_height,
+                    dragging == Some(position),
+                );
 
-                if widgets::row_activated(&hit.response, single_click) {
-                    outcome.jump = Some(row.index);
+                if hit.response.drag_started() {
+                    set_dragging(ui.ctx(), Some(position));
+                }
+
+                if dragging.is_some()
+                    && let Some(at) = pointer
+                    && hit.rect.y_range().contains(at.y)
+                {
+                    // Top half drops above this row, bottom half below it.
+                    let slot = if at.y < hit.rect.center().y {
+                        position
+                    } else {
+                        position + 1
+                    };
+                    drop_slot = Some(slot);
+
+                    let y = if slot == position {
+                        hit.rect.top()
+                    } else {
+                        hit.rect.bottom()
+                    };
+                    ui.painter().hline(
+                        hit.rect.x_range(),
+                        y,
+                        egui::Stroke::new(2.0, col(theme.palette.accent)),
+                    );
+                }
+
+                // A drag is not a click, and while one is running the row is
+                // a drop target rather than a link or a track to play.
+                if dragging.is_some() {
+                    continue;
+                }
+
+                match hit.link {
+                    // A click on a name goes to that name, on the first click
+                    // whatever the activation setting is: following a link is
+                    // not the same gesture as choosing a track.
+                    Some(link) if hit.response.clicked() => match link {
+                        Link::Artist => {
+                            if let Some(id) = row.artist_id {
+                                outcome.open_artist = Some((id, row.artist.clone()));
+                            }
+                        }
+                        Link::Album => {
+                            if let (Some(id), Some(album)) = (row.album_id, row.album.as_ref()) {
+                                outcome.open_album = Some((id, album.clone(), row.artist.clone()));
+                            }
+                        }
+                    },
+                    // Anywhere else on the row is still "play this".
+                    None if widgets::row_activated(&hit.response, single_click) => {
+                        outcome.jump = Some(row.index);
+                    }
+                    _ => {}
                 }
 
                 hit.response.context_menu(|ui| {
@@ -108,6 +235,30 @@ pub fn show(
                 });
             }
         });
+
+    if let Some(from) = dragging {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+
+        if released {
+            // `drop_slot` counts insertion points, so a slot below the lifted
+            // row is one place further along than the index it will occupy
+            // once that row is out of the list.
+            if let Some(slot) = drop_slot {
+                let to = if from < slot {
+                    slot.saturating_sub(1)
+                } else {
+                    slot
+                };
+                if to != from {
+                    outcome.reorder = Some((from, to));
+                }
+            }
+            set_dragging(ui.ctx(), None);
+        }
+
+        // The insertion line has to follow the pointer between rows.
+        ui.ctx().request_repaint();
+    }
 
     outcome
 }
@@ -195,6 +346,12 @@ fn empty(ui: &mut Ui, theme: &Theme) {
 /// The response for one row, so the caller can hang a menu off it.
 struct Hit {
     response: egui::Response,
+    rect: egui::Rect,
+    /// The half of the second line under the pointer, if any.
+    ///
+    /// Returned rather than acted on here so the caller keeps every decision
+    /// about what a click means in one place.
+    link: Option<Link>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -206,12 +363,24 @@ fn entry_row(
     is_current: bool,
     played: bool,
     height: f32,
+    lifted: bool,
 ) -> Hit {
     let m = theme.metrics;
     let p = &theme.palette;
 
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, height), Sense::click_and_drag());
+
+    // The row being carried is dimmed and left in place, so the list does not
+    // reflow under the pointer while the drop target is still being chosen.
+    if lifted {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(m.radius_small),
+            col_alpha(p.accent, 0.10),
+        );
+    }
 
     let hovered = response.hovered();
 
@@ -289,10 +458,10 @@ fn entry_row(
 
     // A row with nothing on its second line centres the first, rather than
     // sitting it high above empty space.
-    let title_y = if row.subtitle.is_empty() {
-        rect.center().y
-    } else {
+    let title_y = if row.has_subtitle() {
         title_y
+    } else {
+        rect.center().y
     };
 
     ui.painter().text(
@@ -303,14 +472,65 @@ fn entry_row(
         title_colour,
     );
 
-    if !row.subtitle.is_empty() {
-        ui.painter().text(
-            egui::pos2(x, subtitle_y),
-            egui::Align2::LEFT_CENTER,
-            widgets::elide(ui, &row.subtitle, &caption_font, text_width),
-            caption_font.clone(),
-            col_alpha(p.text_muted, if played { 0.55 } else { 1.0 }),
+    let mut link = None;
+
+    if row.has_subtitle() {
+        // Each half is painted separately so it can own a rectangle. Laying
+        // them out by measuring as we go is what makes the hit target line up
+        // with the glyphs rather than the whole row.
+        let dim = if played { 0.55 } else { 1.0 };
+        let pointer = response.hover_pos();
+        let mut cursor_x = x;
+        let limit = x + text_width;
+
+        let mut segment = |ui: &Ui, text: &str, target: Option<Link>, painter: &egui::Painter| {
+            if text.is_empty() || cursor_x >= limit {
+                return;
+            }
+
+            let shown = widgets::elide(ui, text, &caption_font, limit - cursor_x);
+            let galley = painter.layout_no_wrap(shown, caption_font.clone(), col(p.text_muted));
+            let size = galley.size();
+            let rect =
+                egui::Rect::from_min_size(egui::pos2(cursor_x, subtitle_y - size.y / 2.0), size);
+
+            let over = target.is_some() && pointer.is_some_and(|at| rect.contains(at));
+            if over {
+                link = target;
+            }
+
+            let colour = if over {
+                col(p.text_primary)
+            } else {
+                col_alpha(p.text_muted, dim)
+            };
+            painter.galley(rect.min, galley, colour);
+
+            if over {
+                // An underline rather than a colour change alone: on a muted
+                // caption the colour shift is easy to miss, and the underline
+                // is what says "this goes somewhere".
+                painter.hline(
+                    rect.x_range(),
+                    rect.bottom() - 1.0,
+                    egui::Stroke::new(1.0, colour),
+                );
+            }
+
+            cursor_x += size.x;
+        };
+
+        let painter = ui.painter().clone();
+        segment(
+            ui,
+            &row.artist,
+            row.artist_id.map(|_| Link::Artist),
+            &painter,
         );
+        if let Some(album) = &row.album {
+            segment(ui, SEPARATOR, None, &painter);
+            segment(ui, album, row.album_id.map(|_| Link::Album), &painter);
+        }
     }
 
     if let Some(duration) = row.duration {
@@ -323,5 +543,13 @@ fn entry_row(
         );
     }
 
-    Hit { response }
+    if link.is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    Hit {
+        response,
+        rect,
+        link,
+    }
 }

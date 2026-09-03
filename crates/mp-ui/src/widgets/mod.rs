@@ -546,6 +546,55 @@ pub fn stacked_lines(
 ///
 /// Returns an empty string when not even the ellipsis fits, which is the only
 /// honest answer for a column that narrow.
+/// A name that goes somewhere, drawn inline.
+///
+/// egui's `Label` cannot restyle itself on hover — the text is already painted
+/// by the time there is a `Response` to ask. So the galley is laid out first,
+/// a rectangle of exactly that size is allocated, and only then is it painted,
+/// in whichever colour the hover state calls for. That order is the whole
+/// trick, and it is why this is not `ui.label` with a `sense`.
+///
+/// `width` elides; pass `f32::INFINITY` for no limit.
+pub fn link_text(
+    ui: &mut Ui,
+    theme: &Theme,
+    text: &str,
+    font: &egui::FontId,
+    width: f32,
+) -> Response {
+    let shown = if width.is_finite() {
+        elide(ui, text, font, width)
+    } else {
+        text.to_owned()
+    };
+
+    let galley = ui
+        .painter()
+        .layout_no_wrap(shown, font.clone(), Color32::WHITE);
+    let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click());
+
+    let hovered = response.hovered();
+    let colour = if hovered {
+        col(theme.palette.text_primary)
+    } else {
+        col(theme.palette.text_muted)
+    };
+    ui.painter().galley(rect.min, galley, colour);
+
+    if hovered {
+        // An underline as well as the colour: on muted caption text the colour
+        // shift alone is easy to miss.
+        ui.painter().hline(
+            rect.x_range(),
+            rect.bottom() - 1.0,
+            egui::Stroke::new(1.0, colour),
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    response
+}
+
 pub fn elide(ui: &Ui, text: &str, font: &egui::FontId, width: f32) -> String {
     let measure = |s: &str| {
         ui.painter()
