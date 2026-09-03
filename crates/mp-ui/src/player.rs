@@ -16,6 +16,7 @@ use mp_audio::engine::{AudioEngine, Command, Event};
 use mp_audio::queue::QueueEntry;
 use mp_core::Config;
 use mp_core::library::Track;
+use mp_core::library::model::{AlbumId, ArtistId};
 
 use crate::library::LibraryState;
 
@@ -26,6 +27,13 @@ pub struct NowPlaying {
     pub title: String,
     pub artist: String,
     pub album: Option<String>,
+    /// Where the artist and album names point.
+    ///
+    /// Carried here rather than looked up on click: the player bar is drawn
+    /// every frame and the index lookup is a database query, but more to the
+    /// point a name is not a key. Two artists can share one.
+    pub artist_id: Option<ArtistId>,
+    pub album_id: Option<AlbumId>,
     /// Cover for the player bar, resolved from the index.
     pub art_id: Option<String>,
     pub duration: Option<Duration>,
@@ -44,6 +52,8 @@ impl NowPlaying {
             title,
             artist: mp_core::library::model::UNKNOWN_ARTIST.to_owned(),
             album: None,
+            artist_id: None,
+            album_id: None,
             art_id: None,
             duration,
         }
@@ -56,6 +66,8 @@ impl NowPlaying {
             artist: track.artist.clone(),
             album: (track.album != mp_core::library::model::UNKNOWN_ALBUM)
                 .then(|| track.album.clone()),
+            artist_id: track.artist_id,
+            album_id: track.album_id,
             art_id: track.art_id.clone(),
             // The engine's measured duration is authoritative; the tag can lie.
             duration: duration.or(track.duration),
@@ -358,6 +370,13 @@ impl Player {
     /// called for any index without the caller having to check first.
     pub fn remove_from_queue(&mut self, index: usize) {
         self.send(Command::Remove(index));
+    }
+
+    /// Move a queue entry within the play order.
+    ///
+    /// Positions are within the order the panel shows, not track indices.
+    pub fn reorder_queue(&mut self, from: usize, to: usize) {
+        self.send(Command::Reorder { from, to });
     }
 
     pub fn clear_queue(&mut self) {

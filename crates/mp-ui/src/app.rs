@@ -593,6 +593,27 @@ impl ResonanceApp {
 
                 let available = ui.available_width();
 
+                // Copied out before the closure: the names are drawn from
+                // `self.player`, and following one of them needs `&mut self`.
+                let names = self.player.now_playing.as_ref().map(|now| {
+                    (
+                        now.artist.clone(),
+                        now.album.clone(),
+                        now.artist_id,
+                        now.album_id,
+                    )
+                });
+                let theme = &self.theme;
+                let caption = ui
+                    .style()
+                    .text_styles
+                    .get(&TextStyle::Name("caption".into()))
+                    .cloned()
+                    .unwrap_or(egui::FontId::proportional(11.0));
+
+                let mut open_artist = None;
+                let mut open_album = None;
+
                 ui.vertical(|ui| {
                     ui.add_space(m.space(0.75));
                     ui.set_max_width(available);
@@ -601,14 +622,93 @@ impl ResonanceApp {
                             .text_style(TextStyle::Body)
                             .color(col(p.text_primary)),
                     );
-                    ui.label(
-                        RichText::new(subtitle)
-                            .text_style(TextStyle::Name("caption".into()))
-                            .color(col(p.text_muted)),
-                    );
+
+                    match &names {
+                        Some((artist, album, artist_id, album_id)) => {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                let mut left = available;
+
+                                let plain = |ui: &mut Ui, text: &str, left: &mut f32| {
+                                    let shown = widgets::elide(ui, text, &caption, *left);
+                                    let response = ui.label(
+                                        RichText::new(shown)
+                                            .text_style(TextStyle::Name("caption".into()))
+                                            .color(col(p.text_muted)),
+                                    );
+                                    *left -= response.rect.width();
+                                };
+
+                                match artist_id {
+                                    Some(id) => {
+                                        let hit =
+                                            widgets::link_text(ui, theme, artist, &caption, left);
+                                        left -= hit.rect.width();
+                                        if hit.clicked() {
+                                            open_artist = Some((*id, artist.clone()));
+                                        }
+                                    }
+                                    // An artist the index does not know is not
+                                    // a link. A control that goes nowhere is
+                                    // worse than plain text.
+                                    None => plain(ui, artist, &mut left),
+                                }
+
+                                if let Some(album) = album {
+                                    plain(ui, " — ", &mut left);
+                                    match album_id {
+                                        Some(id) => {
+                                            let hit = widgets::link_text(
+                                                ui, theme, album, &caption, left,
+                                            );
+                                            left -= hit.rect.width();
+                                            if hit.clicked() {
+                                                open_album =
+                                                    Some((*id, album.clone(), artist.clone()));
+                                            }
+                                        }
+                                        None => plain(ui, album, &mut left),
+                                    }
+                                }
+
+                                let _ = left;
+                            });
+                        }
+                        // Nothing playing: the second line is a prompt, not a
+                        // pair of names.
+                        None => {
+                            ui.label(
+                                RichText::new(subtitle)
+                                    .text_style(TextStyle::Name("caption".into()))
+                                    .color(col(p.text_muted)),
+                            );
+                        }
+                    }
                 });
+
+                if let Some((id, name)) = open_artist {
+                    self.open_artist(id, name);
+                }
+                if let Some((id, title, artist)) = open_album {
+                    self.open_album(id, title, artist);
+                }
             },
         );
+    }
+
+    /// Show an artist's page, from wherever the name was clicked.
+    ///
+    /// The nav rail moves with it: arriving inside "Artists → Someone" while
+    /// the rail still says Queue would leave Back with nowhere sensible to go.
+    fn open_artist(&mut self, id: mp_core::library::model::ArtistId, name: String) {
+        self.library.open(Focus::Artist { id, name });
+        self.view = View::Artists;
+    }
+
+    /// Show an album's page, from wherever the name was clicked.
+    fn open_album(&mut self, id: mp_core::library::model::AlbumId, title: String, artist: String) {
+        self.library.open(Focus::Album { id, title, artist });
+        self.view = View::Albums;
     }
 
     /// Jump the browser to the album (or artist) of the playing track.
@@ -621,18 +721,11 @@ impl ResonanceApp {
         };
 
         if let Some(id) = track.album_id {
-            self.library.open(Focus::Album {
-                id,
-                title: track.album.clone(),
-                artist: track.artist.clone(),
-            });
-            self.view = View::Albums;
+            let (title, artist) = (track.album.clone(), track.artist.clone());
+            self.open_album(id, title, artist);
         } else if let Some(id) = track.artist_id {
-            self.library.open(Focus::Artist {
-                id,
-                name: track.artist.clone(),
-            });
-            self.view = View::Artists;
+            let name = track.artist.clone();
+            self.open_artist(id, name);
         }
     }
 
@@ -1064,7 +1157,12 @@ impl ResonanceApp {
                     Some(track) => views::queue::Row {
                         index: entry.index,
                         title: track.title.clone(),
-                        subtitle: track.subtitle(),
+                        artist: track.artist.clone(),
+                        album: (track.album != mp_core::library::model::UNKNOWN_ALBUM
+                            && !track.album.is_empty())
+                        .then(|| track.album.clone()),
+                        artist_id: track.artist_id,
+                        album_id: track.album_id,
                         duration: track.duration,
                     },
                     None => views::queue::Row {
@@ -1073,7 +1171,10 @@ impl ResonanceApp {
                             .path
                             .file_stem()
                             .map_or_else(String::new, |s| s.to_string_lossy().into()),
-                        subtitle: String::new(),
+                        artist: String::new(),
+                        album: None,
+                        artist_id: None,
+                        album_id: None,
                         duration: None,
                     },
                 }
@@ -1115,6 +1216,15 @@ impl ResonanceApp {
 
         if let Some(index) = outcome.jump {
             self.player.jump_to(index);
+        }
+        if let Some((id, name)) = outcome.open_artist {
+            self.open_artist(id, name);
+        }
+        if let Some((id, title, artist)) = outcome.open_album {
+            self.open_album(id, title, artist);
+        }
+        if let Some((from, to)) = outcome.reorder {
+            self.player.reorder_queue(from, to);
         }
         if let Some(index) = outcome.remove {
             self.player.remove_from_queue(index);
@@ -2829,10 +2939,12 @@ impl eframe::App for ResonanceApp {
         let library_changed = self.library.update();
         if library_changed {
             self.announce_scan();
-            // Cover ids are content hashes, and a rescan can retire the one
-            // the theme is holding, so the cached palettes go with it.
-            self.adaptive.clear();
-            self.visualizers.set_cover(None);
+            // Cover ids are content hashes, and a rescan can retire the one a
+            // cached palette was read for, so the cache goes. The colour on
+            // screen stays: the cover has not changed just because the scanner
+            // ran, and dropping it flashed the whole shell back to the
+            // configured accent for the length of a fade.
+            self.adaptive.forget_palettes();
         }
         self.player.update(
             dt,

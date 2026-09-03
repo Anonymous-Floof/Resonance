@@ -2,7 +2,7 @@
 members = ["crates/mp-core", "crates/mp-audio", "crates/mp-ui"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # 1.88 rather than the 1.85 that edition 2024 alone needs: the codebase uses
 # let-chains (`if let Some(x) = ... && ...`), which stabilised in 1.88.

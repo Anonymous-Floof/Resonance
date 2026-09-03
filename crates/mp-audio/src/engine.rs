@@ -73,6 +73,12 @@ pub enum Command {
     JumpTo(usize),
     /// Drop one queue entry by its index. Ignored for the playing track.
     Remove(usize),
+    /// Move a queue entry within the play order. Both are positions in that
+    /// order, and `to` is where the entry lands once lifted out.
+    Reorder {
+        from: usize,
+        to: usize,
+    },
 
     Play,
     Pause,
@@ -348,6 +354,11 @@ impl AudioEngine {
             preamp_db: equalizer.preamp_db,
             limiter: equalizer.limiter,
         });
+    }
+
+    /// Move a queue entry within the play order.
+    pub fn reorder_queue(&self, from: usize, to: usize) {
+        self.send(Command::Reorder { from, to });
     }
 
     /// Set the crossfade length and shape.
@@ -837,6 +848,10 @@ impl Worker {
 
             Command::Remove(index) => {
                 self.queue.remove(index);
+            }
+
+            Command::Reorder { from, to } => {
+                self.queue.reorder(from, to);
             }
 
             Command::Play => {

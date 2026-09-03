@@ -130,10 +130,24 @@ impl Adaptive {
         self.palette.as_ref()
     }
 
-    /// Drop everything remembered. Used when the library is rescanned, since
-    /// cover ids can be reassigned under us.
-    pub fn clear(&mut self) {
-        *self = Self::new();
+    /// Forget the palettes read so far, keeping the colour on screen.
+    ///
+    /// Called when the library is rescanned. Cover ids are content hashes, so
+    /// a rescan can retire the one a cached palette was read for, and the
+    /// cache has to go.
+    ///
+    /// What must *not* go is the fade state. Resetting that made the shell
+    /// snap to the configured accent and fade back over [`FADE_SECONDS`] — on
+    /// a track that had not changed, every time the folder watcher ran. The
+    /// cover on screen is still the cover on screen whatever the scanner found.
+    ///
+    /// `showing` is deliberately kept, so [`observe`] finds nothing to do for
+    /// an unchanged track. If the id really has been retired, the player's own
+    /// `art_id` changes and a fresh palette is read then.
+    ///
+    /// [`observe`]: Self::observe
+    pub fn forget_palettes(&mut self) {
+        self.cache.clear();
     }
 }
 
@@ -238,17 +252,35 @@ mod tests {
         assert!(!state.advance(1.0), "a finished fade is not still moving");
     }
 
+    /// The bug this guards against: the folder watcher rescans every 45
+    /// seconds whether or not anything changed, and dropping the whole theme
+    /// on a rescan made the shell flash back to the configured accent and fade
+    /// in again — on a track nobody had touched.
     #[test]
-    fn clearing_forgets_the_current_cover() {
+    fn a_rescan_leaves_the_colour_on_screen_alone() {
         let mut state = Adaptive::new();
+        state.showing = Some("cover-1".into());
+        state.cache.insert("cover-1".into(), None);
         fade_to(&mut state, Some(RED));
         state.advance(FADE_SECONDS * 2.0);
-        state.showing = Some("abc".into());
+        assert_eq!(state.accent(CONFIGURED), RED);
 
-        state.clear();
+        state.forget_palettes();
 
-        assert_eq!(state.accent(CONFIGURED), CONFIGURED);
-        assert!(state.showing.is_none());
-        assert!(state.palette().is_none());
+        assert_eq!(
+            state.accent(CONFIGURED),
+            RED,
+            "a rescan must not repaint a track that is still playing"
+        );
+        assert!(!state.is_animating(), "and must not start a fade either");
+        assert_eq!(
+            state.showing.as_deref(),
+            Some("cover-1"),
+            "the cover on screen is unchanged, so `observe` must find nothing to do"
+        );
+        assert!(
+            state.cache.is_empty(),
+            "the cached palettes are the one thing a rescan does invalidate"
+        );
     }
 }

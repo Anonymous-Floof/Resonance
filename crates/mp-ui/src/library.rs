@@ -479,7 +479,7 @@ impl LibraryState {
 
         self.scan = None;
 
-        match result {
+        let changed = match result {
             Ok(summary) => {
                 tracing::info!("scan: {}", summary.describe());
                 if summary.removed > 0 {
@@ -488,8 +488,23 @@ impl LibraryState {
                     let _ = self.library.prune_art_cache();
                 }
                 self.last_summary = Some(summary);
+                summary.changed_anything()
             }
-            Err(err) => tracing::error!("scan failed: {err:#}"),
+            // The library may have been left part-written, so assume the worst
+            // and re-read. A failed scan is rare; a stale list is not worth it.
+            Err(err) => {
+                tracing::error!("scan failed: {err:#}");
+                true
+            }
+        };
+
+        if !changed {
+            // The watcher rescans every 45 seconds whether or not anything has
+            // changed, and almost always nothing has. Reporting a change
+            // regardless made every one of those re-run the browse queries and
+            // recompute the statistics, for an answer identical to the one
+            // already on screen.
+            return false;
         }
 
         // The scan ran on another connection, so this one has to re-read.
