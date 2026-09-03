@@ -1,3 +1,13 @@
+> [!IMPORTANT]
+> **This is the `networked` branch.** `main` is offline-absolute — no HTTP
+> client in the binary at all. This branch exists to add network features
+> openly: lyrics, artwork, artist and genre metadata, and more.
+>
+> Everything below still describes the offline build, because at the branch
+> point that is exactly what this is. **The claims about having no network
+> access must be rewritten in the same commit that makes the first request** —
+> see [BRANCH.md](BRANCH.md).
+
 > [!NOTE]
 > - This project was built with 99% AI assistance (Claude Opus 5+) under human oversight. 🤖
 > - Expect there to be bugs and balancing issues
