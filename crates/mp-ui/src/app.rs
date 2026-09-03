@@ -2829,10 +2829,12 @@ impl eframe::App for ResonanceApp {
         let library_changed = self.library.update();
         if library_changed {
             self.announce_scan();
-            // Cover ids are content hashes, and a rescan can retire the one
-            // the theme is holding, so the cached palettes go with it.
-            self.adaptive.clear();
-            self.visualizers.set_cover(None);
+            // Cover ids are content hashes, and a rescan can retire the one a
+            // cached palette was read for, so the cache goes. The colour on
+            // screen stays: the cover has not changed just because the scanner
+            // ran, and dropping it flashed the whole shell back to the
+            // configured accent for the length of a fade.
+            self.adaptive.forget_palettes();
         }
         self.player.update(
             dt,
