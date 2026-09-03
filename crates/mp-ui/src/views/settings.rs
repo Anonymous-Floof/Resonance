@@ -740,7 +740,7 @@ fn library_section(
             ui,
             theme,
             "Ignore leading 'The'",
-            "Sorts 'The Wandering Hours' under B",
+            "Sorts 'The Wandering Hours' under W",
             |ui| ui.checkbox(&mut l.ignore_leading_articles, "").changed(),
         )
         .apply(out);
