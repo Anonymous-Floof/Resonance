@@ -89,7 +89,7 @@ this.
 ## Checks before any commit
 
 ```bash
-cargo test --workspace          # 832 tests
+cargo test --workspace          # 843 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all
 ```

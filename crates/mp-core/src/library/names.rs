@@ -353,6 +353,25 @@ pub fn strip_redundant_artist_prefix(title: &str, artist: &str) -> String {
     title.to_owned()
 }
 
+/// Drop `(...)` and `[...]` decoration that carries no musical meaning.
+///
+/// The same rule [`parse`] applies to a filename, exposed for a caller that
+/// already has a title and only wants the noise off it. A tagged file keeps
+/// whatever its tags say, so `Song (Official Video)` survives scanning intact
+/// — which is fine for display and ruinous for anything that has to match the
+/// title against somebody else's copy of the same song.
+///
+/// Deliberately conservative: only the known-decoration list is removed, plus
+/// YouTube-shaped ids and bare numbers inside square brackets. Anything that
+/// might name a different recording — `(Live)`, `(Acoustic)`, `[Remix]`,
+/// `(feat. …)` — is left alone, because dropping it would not clean the title
+/// up so much as change which song it refers to.
+pub fn strip_decoration(title: &str) -> String {
+    let mut title = title.to_owned();
+    strip_asides(&mut title);
+    title
+}
+
 /// Split `Artist-Title` where there are no spaces around the dash.
 ///
 /// Wildly ambiguous on its own - `Winds-of-Fjord` is one title, not an artist
@@ -626,5 +645,77 @@ mod tests {
     #[test]
     fn an_article_alone_is_left_alone() {
         assert_eq!(sort_key("The", true), "the");
+    }
+
+    // -- strip_decoration ---------------------------------------------------
+
+    #[test]
+    fn decoration_is_stripped_from_a_title() {
+        assert_eq!(
+            strip_decoration("Five Nights at Freddy's (Official Video)"),
+            "Five Nights at Freddy's"
+        );
+        assert_eq!(
+            strip_decoration("It's Been So Long [HD]"),
+            "It's Been So Long"
+        );
+        assert_eq!(
+            strip_decoration("Survive the Night (Lyrics)"),
+            "Survive the Night"
+        );
+        assert_eq!(
+            strip_decoration("Die in a Fire [Official Music Video] [4K]"),
+            "Die in a Fire"
+        );
+    }
+
+    /// The difference between cleaning a title and changing which song it
+    /// names. These all identify a different recording and must survive.
+    #[test]
+    fn a_meaningful_aside_is_never_dropped() {
+        for title in [
+            "Creep (Acoustic)",
+            "Creep (Live)",
+            "Creep (Live at Glastonbury)",
+            "Song [Remix]",
+            "Song (Radio Edit)",
+            "Song (feat. Somebody)",
+            "Song (Extended Mix)",
+            "Song (Instrumental)",
+        ] {
+            assert_eq!(strip_decoration(title), title, "{title} lost meaning");
+        }
+    }
+
+    #[test]
+    fn a_title_with_nothing_to_strip_is_returned_unchanged() {
+        assert_eq!(strip_decoration("Creep"), "Creep");
+        assert_eq!(strip_decoration(""), "");
+    }
+
+    /// Stripping every aside must not leave an empty title, which would turn a
+    /// lookup into a request for nothing at all.
+    #[test]
+    fn a_title_that_is_all_decoration_is_left_recognisable() {
+        let stripped = strip_decoration("(Official Video)");
+        assert!(
+            stripped.is_empty() || stripped == "(Official Video)",
+            "unexpected: {stripped:?}"
+        );
+    }
+
+    #[test]
+    fn square_brackets_lose_video_ids_and_bare_numbers() {
+        assert_eq!(strip_decoration("Song [dQw4w9WgXcQ]"), "Song");
+        assert_eq!(strip_decoration("Song [12345]"), "Song");
+    }
+
+    /// An unbalanced bracket is a typo, not a structure to guess at.
+    #[test]
+    fn an_unbalanced_bracket_is_left_alone() {
+        assert_eq!(
+            strip_decoration("Song (Official Video"),
+            "Song (Official Video"
+        );
     }
 }

@@ -163,11 +163,11 @@ Portable mode makes Resonance leave *nothing* on the host machine, so the whole
 app — settings, library index, artwork and logs — can live on a USB stick.
 
 **To turn it on:** create an empty file called `resonance.portable` in the same
-folder as `resonance.exe`.
+folder as the executable.
 
 ```
 E:\Resonance\
-├── resonance.exe
+├── resonance-networked.exe
 └── resonance.portable      ← this file, empty, switches it on
 ```
 
@@ -176,7 +176,7 @@ everything there instead of in your user profile:
 
 ```
 E:\Resonance\
-├── resonance.exe
+├── resonance-networked.exe
 ├── resonance.portable
 └── Resonance-data\
     ├── config\             settings
@@ -276,7 +276,7 @@ contributed to by the people who use it.
 | | |
 |---|---|
 | **Where it goes** | `lrclib.net`, and nowhere else |
-| **What is sent** | The artist, title and album from that track's own tags, and its length in seconds |
+| **What is sent** | The artist, title and album from that track's own tags, and its length in seconds. Video decoration like `(Official Video)` or `[HD]` is taken off the title first — the file itself is never changed |
 | **What is not sent** | Anything about you, your library, your file paths, or what else you listen to. There is no account and no identifier |
 | **When** | Only when you open the full-screen view, once per track, never twice |
 | **If it fails** | Nothing happens. The track has no lyrics, exactly as before |
@@ -344,9 +344,20 @@ four fields at once:
 | Album | Missing, or the channel name again | The release it appeared on |
 | Duration | A second or two out, from added intros or trailing silence | The release duration |
 
-Resonance already cleans up what it can *prove* at scan time — `- Topic`
-suffixes, download-site watermarks, titles that repeat their own artist — but
-it deliberately stops there rather than inventing metadata, so plenty survives.
+Resonance cleans up what it can *prove*. Scanning removes `- Topic` suffixes,
+download-site watermarks and titles that repeat their own artist; the lookup
+additionally takes video decoration off the title before asking, so
+`Die in a Fire (Official Video)` is looked up as `Die in a Fire`. None of that
+touches your files — the tags stay exactly as they are, and only the question
+is cleaned.
+
+What it will not do is guess. An aside that could name a different recording —
+`(Live)`, `(Acoustic)`, `[Remix]`, `(feat. …)` — is always kept, because
+dropping it would not tidy the title so much as ask about a different song.
+
+**The artist is what usually survives to break a lookup.** A channel name that
+is not `… - Topic` is indistinguishable from a real band name, and there is
+nothing to match it against offline.
 
 Two further things make this worse for some collections than others:
 
@@ -454,7 +465,7 @@ scripted fake. **No test in the workspace opens a socket.**
 ## Tests
 
 ```bash
-cargo test --workspace          # 832 tests
+cargo test --workspace          # 843 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```

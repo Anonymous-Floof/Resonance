@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use mp_core::library::Lyrics;
-use mp_core::library::lyrics;
+use mp_core::library::{lyrics, names};
 use mp_net::Activity;
 use mp_net::lyrics::{Client, Match, Query};
 
@@ -204,10 +204,32 @@ impl LyricsJob {
 
 /// Build the question from what the player already knows about the track.
 ///
-/// The tags as they are, not cleaned up: LRCLIB matches against what other
-/// people's files say, and those carry the same imperfections.
+/// The artist and album go as they are. The title has its video decoration
+/// removed first — `(Official Video)`, `[HD]`, `[dQw4w9WgXcQ]` — because
+/// scanning only strips that from *filenames*, so a tagged rip keeps it, and
+/// the lookup matches the title exactly.
+///
+/// It was worth checking rather than assuming: LRCLIB is contributed to by
+/// people whose files have the same problems, so their copies might plausibly
+/// carry the same decoration. They do not. A title with `(Official Video)` on
+/// it misses where the same title without it is found.
+///
+/// [`strip_decoration`](names::strip_decoration) only removes decoration that
+/// cannot name a different recording, so `(Live)`, `(Acoustic)` and `[Remix]`
+/// are left on. The file itself is never touched — this cleans the question,
+/// not the track.
 fn query_for(track: &NowPlaying) -> Query {
-    let mut query = Query::new(track.artist.clone(), track.title.clone());
+    let title = names::strip_decoration(&track.title);
+
+    // A title that was nothing but decoration is left as it was. There is no
+    // answer either way, and the log should show what the file actually says.
+    let title = if title.trim().is_empty() {
+        track.title.clone()
+    } else {
+        title
+    };
+
+    let mut query = Query::new(track.artist.clone(), title);
 
     if let Some(album) = &track.album {
         query = query.with_album(album.clone());
@@ -400,5 +422,76 @@ mod tests {
         .expect("start");
 
         assert_eq!(job.matching(), Match::Exact);
+    }
+
+    // -- building the question ----------------------------------------------
+
+    fn playing(title: &str) -> NowPlaying {
+        NowPlaying {
+            path: PathBuf::from("C:/music/Track.mp3"),
+            title: title.to_owned(),
+            artist: "The Living Tombstone".to_owned(),
+            album: Some("Single".to_owned()),
+            artist_id: None,
+            album_id: None,
+            art_id: None,
+            duration: Some(std::time::Duration::from_secs(263)),
+        }
+    }
+
+    /// Scanning strips this from filenames but not from tags, so a tagged rip
+    /// carries it into a lookup that matches the title exactly.
+    #[test]
+    fn video_decoration_is_taken_off_the_title_before_asking() {
+        assert_eq!(
+            query_for(&playing("Die in a Fire (Official Video)")).title,
+            "Die in a Fire"
+        );
+        assert_eq!(
+            query_for(&playing("Die in a Fire [HD]")).title,
+            "Die in a Fire"
+        );
+        assert_eq!(
+            query_for(&playing("Die in a Fire (Lyrics) [4K]")).title,
+            "Die in a Fire"
+        );
+    }
+
+    /// The line between cleaning a title and asking about a different song.
+    #[test]
+    fn an_aside_that_names_the_recording_is_kept() {
+        for title in [
+            "Die in a Fire (Live)",
+            "Die in a Fire (Acoustic)",
+            "Die in a Fire [Remix]",
+            "Die in a Fire (feat. Somebody)",
+        ] {
+            assert_eq!(query_for(&playing(title)).title, title);
+        }
+    }
+
+    /// The file is never touched, and neither is the rest of the question.
+    #[test]
+    fn only_the_title_is_cleaned() {
+        let query = query_for(&playing("Die in a Fire (Official Video)"));
+
+        assert_eq!(query.artist, "The Living Tombstone");
+        assert_eq!(query.album.as_deref(), Some("Single"));
+        assert_eq!(query.duration, Some(std::time::Duration::from_secs(263)));
+    }
+
+    /// Stripping everything would leave nothing to ask about, and the log
+    /// should show what the file actually says.
+    #[test]
+    fn a_title_that_is_only_decoration_is_left_as_it_is() {
+        assert_eq!(
+            query_for(&playing("(Official Video)")).title,
+            "(Official Video)"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_title_is_passed_through_untouched() {
+        assert_eq!(query_for(&playing("Die in a Fire")).title, "Die in a Fire");
     }
 }
