@@ -42,7 +42,7 @@ fn main() -> Result<()> {
     let config = Config::load(&paths).context("loading settings")?;
 
     let viewport = egui::ViewportBuilder::default()
-        .with_title(mp_core::APP_NAME)
+        .with_title(mp_core::APP_TITLE)
         .with_inner_size([config.window.width, config.window.height])
         .with_min_inner_size(mp_ui::MIN_WINDOW_SIZE)
         .with_maximized(config.window.maximized)

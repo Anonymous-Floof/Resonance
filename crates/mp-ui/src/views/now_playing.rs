@@ -255,7 +255,7 @@ fn corner_controls(
 
             // Only offered when there is something to show. A toggle that
             // reveals an empty pane is worse than no toggle.
-            if state.has_lyrics() {
+            if state.has_lyrics() || state.is_awaiting_lyrics() {
                 ui.add_space(m.space(0.5));
                 if widgets::icon_button(ui, theme, Icon::Lyrics, size, state.shows_lyrics())
                     .clicked()
@@ -479,6 +479,15 @@ fn lyrics_pane(ui: &mut Ui, theme: &Theme, state: &mut Immersive, position: f64)
     let p = theme.palette;
 
     let Some(lyrics) = state.lyrics().cloned() else {
+        // The pane is open with nothing in it, which happens only while a
+        // lookup is out. Saying so beats an empty column.
+        if state.is_awaiting_lyrics() {
+            ui.label(
+                RichText::new("Looking for lyrics…")
+                    .text_style(TextStyle::Name("caption".into()))
+                    .color(col(p.text_muted)),
+            );
+        }
         return;
     };
 
@@ -490,9 +499,22 @@ fn lyrics_pane(ui: &mut Ui, theme: &Theme, state: &mut Immersive, position: f64)
 
     let scroll_now = state.take_scroll(active);
 
+    // Words that came over the network say so. Showing them exactly like the
+    // ones found on disk would be the app quietly passing off a lookup as
+    // something it already had, and where a lyric came from is precisely the
+    // thing a user of this build would want to know.
+    if lyrics.source.is_fetched() {
+        ui.label(
+            RichText::new(lyrics.source.describe())
+                .text_style(TextStyle::Name("caption".into()))
+                .color(col(p.text_muted)),
+        );
+        ui.add_space(m.space(0.5));
+    }
+
     if !lyrics.is_synced() {
         ui.label(
-            RichText::new("No timings in this file, so the words do not follow along.")
+            RichText::new("No timings for these words, so they do not follow along.")
                 .text_style(TextStyle::Name("caption".into()))
                 .color(col(p.text_muted)),
         );

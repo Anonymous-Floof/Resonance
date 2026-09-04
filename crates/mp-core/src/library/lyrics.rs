@@ -28,6 +28,33 @@ pub enum Source {
     Embedded,
     /// A file sitting beside the track.
     Sidecar(PathBuf),
+    /// Fetched from a service, and cached. Carries the service's name.
+    ///
+    /// Kept distinct from the two local sources rather than folded in with
+    /// them, because the difference is exactly what a user would want to know.
+    /// Words that arrived over the network should say so on screen; anything
+    /// else would be this build quietly passing off a lookup as something it
+    /// found on disk.
+    Fetched(String),
+}
+
+impl Source {
+    /// How this reads on screen, under the words.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Embedded => "From this file's tags".to_owned(),
+            Self::Sidecar(path) => match path.file_name() {
+                Some(name) => format!("From {}", name.to_string_lossy()),
+                None => "From a file beside this track".to_owned(),
+            },
+            Self::Fetched(service) => format!("Fetched from {service}"),
+        }
+    }
+
+    /// Whether these words came from off the machine.
+    pub fn is_fetched(&self) -> bool {
+        matches!(self, Self::Fetched(_))
+    }
 }
 
 /// One line, with the moment it is sung if that is known.
@@ -453,5 +480,29 @@ mod tests {
         let missing = Path::new("no-such-directory-here/Song.mp3");
         assert!(sidecar_for(missing).is_none());
         assert!(for_track(missing).is_none());
+    }
+
+    /// Words that arrived over the network must say so. Showing them exactly
+    /// like the ones found on disk would be the build quietly passing off a
+    /// lookup as something it already had.
+    #[test]
+    fn fetched_lyrics_say_where_they_came_from() {
+        let fetched = Source::Fetched("LRCLIB".to_owned());
+
+        assert!(fetched.is_fetched());
+        assert_eq!(fetched.describe(), "Fetched from LRCLIB");
+    }
+
+    #[test]
+    fn local_lyrics_are_not_reported_as_fetched() {
+        assert!(!Source::Embedded.is_fetched());
+        assert!(!Source::Sidecar(PathBuf::from("Song.lrc")).is_fetched());
+
+        assert_eq!(Source::Embedded.describe(), "From this file's tags");
+        assert_eq!(
+            Source::Sidecar(PathBuf::from("C:/music/Song.lrc")).describe(),
+            "From Song.lrc",
+            "the folder is noise; the filename is the useful part"
+        );
     }
 }

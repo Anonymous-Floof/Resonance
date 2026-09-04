@@ -5,6 +5,7 @@
 //! [`crate::player::Player`], and how anything looks lives in the theme — so a
 //! change to any one of those does not come back here.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::Frame;
@@ -13,6 +14,7 @@ use mp_core::color::Rgb;
 use mp_core::config::{SurfaceStyle, ThemeMode, VizColorMode};
 use mp_core::library::{ArtSize, Library, Order};
 use mp_core::{AppPaths, Config};
+use mp_net::Activity;
 
 use crate::adaptive::Adaptive;
 use crate::analysis_job::AnalysisJob;
@@ -20,6 +22,7 @@ use crate::artwork::Artwork;
 use crate::fonts::{self, FontReport};
 use crate::immersive::Immersive;
 use crate::library::{Emptiness, Focus, LibraryState};
+use crate::lyrics_job::LyricsJob;
 use crate::platform::{MediaCommand, MediaControls, NowPlayingInfo, PlaybackState};
 use crate::player::Player;
 use crate::playlists::PlaylistState;
@@ -69,6 +72,20 @@ pub struct ResonanceApp {
 
     /// The full-screen now-playing view and its lyrics.
     immersive: Immersive,
+
+    /// The record of every request this build has made.
+    ///
+    /// Held even when nothing can make a request, so the settings page can
+    /// show the file and its history whether or not fetching is switched on
+    /// right now. Opening it writes nothing until something is recorded.
+    activity: Arc<Activity>,
+
+    /// The lyrics fetcher, present only while online lyrics are switched on.
+    ///
+    /// Started and stopped by [`Self::tend_lyrics`] as the setting changes, so
+    /// there is no worker thread and no possibility of a request while the
+    /// feature is off.
+    lyrics_job: Option<LyricsJob>,
 
     /// Whether the first-run welcome is still showing.
     ///
@@ -167,6 +184,18 @@ impl ResonanceApp {
             tracing::info!("system media controls attached");
         }
 
+        // The disclosure log lives in the data directory rather than the
+        // cache, because a record the application may clear whenever it likes
+        // is a weaker promise than one it may not. Failing to open it costs
+        // the file and nothing else — the entries are still kept in memory and
+        // still shown in Settings.
+        let activity = Arc::new(
+            Activity::open(paths.data_dir().join(mp_net::LOG_FILE_NAME)).unwrap_or_else(|err| {
+                tracing::warn!("network activity will not be written to disk: {err:#}");
+                Activity::in_memory()
+            }),
+        );
+
         let library = match Library::open(&paths) {
             Ok(library) => library,
             Err(err) => {
@@ -205,6 +234,8 @@ impl ResonanceApp {
             playlist_editing: views::playlists::Editing::default(),
             adaptive: Adaptive::new(),
             immersive: Immersive::new(),
+            activity,
+            lyrics_job: None,
             welcome: first_run,
             focus_search: false,
             media,
@@ -1918,6 +1949,95 @@ impl ResonanceApp {
         }
     }
 
+    /// Open the network activity log in the system file manager.
+    ///
+    /// A log the user is told about but cannot get to is not much of a
+    /// disclosure, and the path alone means finding `%APPDATA%` by hand.
+    fn show_activity_log(&mut self) {
+        let Some(path) = self.activity.path() else {
+            self.player
+                .notice("There is no activity log on disk.".to_owned(), true);
+            return;
+        };
+
+        // Selected in its folder rather than opened, because what opens a
+        // `.log` file varies by machine and a folder always works.
+        #[cfg(windows)]
+        let launched = std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn();
+
+        #[cfg(not(windows))]
+        let launched = std::process::Command::new("xdg-open")
+            .arg(path.parent().unwrap_or(&path))
+            .spawn();
+
+        match launched {
+            // Explorer reports failure through its exit code even when it
+            // worked, so the spawn succeeding is as much as can be checked.
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!("could not open the activity log: {err}");
+                self.player
+                    .notice(format!("The log is at {}", path.display()), false);
+            }
+        }
+    }
+
+    /// Forget every lyric fetched so far.
+    ///
+    /// Only the cache on disk. Lyrics already on screen stay until the track
+    /// changes, and the session memo in the fetcher is dropped with it so the
+    /// next lookup genuinely asks again.
+    fn clear_lyrics_cache(&mut self) {
+        let cache =
+            mp_net::Cache::new(self.paths.cache_dir().join(mp_net::lyrics::CACHE_NAMESPACE));
+
+        match cache.clear() {
+            Ok(()) => {
+                // Dropped so the in-memory answers go too; it restarts on the
+                // next frame if the setting is still on.
+                self.lyrics_job = None;
+                self.player
+                    .notice("Cached lyrics cleared.".to_owned(), false);
+            }
+            Err(err) => {
+                tracing::warn!("could not clear the lyrics cache: {err:#}");
+                self.player
+                    .notice("Could not clear the cached lyrics.".to_owned(), true);
+            }
+        }
+    }
+
+    /// Start or stop the lyrics fetcher as the setting changes, and collect
+    /// anything it has finished.
+    ///
+    /// The worker exists only while the setting is on. Turning it off drops
+    /// the handle, which closes the channel and ends the thread — so "off"
+    /// means there is no code running that could make a request, rather than
+    /// a flag being checked somewhere.
+    fn tend_lyrics(&mut self, ctx: &egui::Context) {
+        match (self.config.privacy.online_lyrics, self.lyrics_job.is_some()) {
+            (true, false) => {
+                self.lyrics_job = LyricsJob::start(
+                    self.paths.cache_dir().to_path_buf(),
+                    Arc::clone(&self.activity),
+                    ctx.clone(),
+                );
+            }
+            (false, true) => self.lyrics_job = None,
+            _ => {}
+        }
+
+        // An answer that landed while the window was idle produced no frame of
+        // its own; the worker asks for one, and this picks it up.
+        if let Some(job) = &mut self.lyrics_job
+            && job.poll()
+        {
+            ctx.request_repaint();
+        }
+    }
+
     fn playlists_view(&mut self, ui: &mut Ui) {
         let outcome = views::playlists::show(
             ui,
@@ -2586,7 +2706,7 @@ impl ResonanceApp {
     /// nav rail, content, player bar — is gone: the point of the view is that
     /// there is nothing on screen but the record.
     fn immersive_view(&mut self, ui: &mut Ui, dt: f32) {
-        crate::window_frame::title_bar(ui, &self.theme, mp_core::APP_NAME);
+        crate::window_frame::title_bar(ui, &self.theme, mp_core::APP_TITLE);
 
         let scene = views::now_playing::Scene {
             theme: &self.theme,
@@ -2652,6 +2772,8 @@ impl ResonanceApp {
             Vec::new()
         };
 
+        let log_path = self.activity.path();
+
         let outcome = views::settings::show(
             ui,
             &self.theme,
@@ -2662,8 +2784,22 @@ impl ResonanceApp {
             views::settings::Live {
                 sleep: self.player.sleep(),
                 fades: self.player.fades(),
+                network: views::settings::Network {
+                    source: &mp_net::source::LRCLIB,
+                    entries: self.activity.len(),
+                    requests: self.activity.requests_made(),
+                    log_path: log_path.as_deref(),
+                },
             },
         );
+
+        if outcome.show_activity_log {
+            self.show_activity_log();
+        }
+
+        if outcome.clear_lyrics_cache {
+            self.clear_lyrics_cache();
+        }
 
         if let Some(choice) = outcome.set_sleep {
             self.player.set_sleep(choice);
@@ -2955,10 +3091,14 @@ impl eframe::App for ResonanceApp {
         self.playlists.update(self.library.library());
         self.top_up_radio();
         self.tend_analysis();
+        self.tend_lyrics(ui.ctx());
 
         // Lyrics are read from disk, so this only does anything while the
-        // full-screen view is open and the track has changed under it.
-        self.immersive.observe(self.player.current_path());
+        // full-screen view is open and the track has changed under it. The
+        // fetcher is `None` unless online lyrics are switched on, in which
+        // case a track with nothing on disk is looked up in the background.
+        self.immersive
+            .observe(self.player.now_playing.as_ref(), self.lyrics_job.as_mut());
 
         self.tend_media_session();
 
@@ -3036,7 +3176,7 @@ impl eframe::App for ResonanceApp {
 
         // The window is undecorated, so the chrome is ours to draw. The title
         // bar claims the top strip before any other panel.
-        crate::window_frame::title_bar(ui, &self.theme, mp_core::APP_NAME);
+        crate::window_frame::title_bar(ui, &self.theme, mp_core::APP_TITLE);
 
         self.nav_rail(ui);
         self.player_bar(ui);

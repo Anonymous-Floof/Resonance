@@ -7,23 +7,18 @@
 //! opt-in screen, the activity log, and the rate limiter — and they must be the
 //! same answers in all three, which is why they are one value and not three.
 //!
-//! ## The registry is empty, and that is the point
+//! ## The registry
 //!
-//! [`SOURCES`] lists every source this build can reach. Today it is empty,
-//! because this build reaches nothing: there is no transport in the crate yet.
-//! Each source gets appended in the same commit that makes it work, alongside
-//! the settings and the documentation that describe it — never before.
+//! [`SOURCES`] lists every source this build can reach — the complete answer
+//! to "where can this thing talk to", in one place, checkable at a glance.
+//! Each entry is added in the same commit that makes it work, alongside the
+//! setting that governs it and the documentation that describes it.
 //!
-//! Most of the tests below are therefore written as rules over the whole
-//! registry rather than assertions about its current contents: they pass
-//! vacuously today, they check the first entry the moment it is added, and
-//! they never have to be rewritten to make room for it.
-//!
-//! One is not like that. `no_source_is_reachable_until_one_is_added_deliberately`
-//! asserts the registry is empty, and adding a source is supposed to break it.
-//! That is the point — it is the "never ship a setting before the feature"
-//! rule made executable, and failing it is the reminder that the settings, the
-//! documentation and the README claims are due in the same commit.
+//! It held nothing until LRCLIB was added for lyrics, and a test asserted the
+//! emptiness so that the first addition could not happen quietly. That test
+//! has done its job and is gone; the rules below outlive it, and they are
+//! written over the whole registry so the *next* entry is checked the moment
+//! it arrives.
 
 use std::time::Duration;
 
@@ -70,10 +65,27 @@ pub struct Source {
     pub min_interval: Duration,
 }
 
-/// Every source this build can reach.
+/// Lyrics, contributed by its users and given away for free.
 ///
-/// Empty until the first fetcher lands. See the module documentation.
-pub const SOURCES: &[Source] = &[];
+/// Chosen over the alternatives because it needs no account and no API key,
+/// and because `/api/get` matches on artist, title, album *and* duration at
+/// once — so a lookup either finds the right recording or finds nothing. A
+/// service that returns near-enough matches is how the wrong words end up on
+/// a song, and there is no undo for that.
+pub const LRCLIB: Source = Source {
+    id: "lrclib",
+    label: "LRCLIB",
+    host: "lrclib.net",
+    purpose: "Lyrics, timed to the music where someone has contributed them.",
+    sends: "The artist, title and album from the track's own tags, and its length in seconds.",
+    terms: "https://lrclib.net/docs",
+    // LRCLIB asks for requests one at a time with a short gap between them,
+    // and answers 429 with a Retry-After when that is ignored.
+    min_interval: Duration::from_millis(500),
+};
+
+/// Every source this build can reach.
+pub const SOURCES: &[Source] = &[LRCLIB];
 
 /// Look up a source by its [`id`](Source::id).
 ///
@@ -100,12 +112,10 @@ mod tests {
     };
 
     #[test]
-    fn no_source_is_reachable_until_one_is_added_deliberately() {
+    fn the_registry_lists_what_this_build_can_reach() {
         assert!(
-            SOURCES.is_empty(),
-            "a source appeared without this test being updated to expect it, \
-             which means it arrived without the settings and documentation \
-             that are supposed to land in the same commit"
+            find("lrclib").is_some(),
+            "lyrics fetching is built, so its source must be listed"
         );
     }
 

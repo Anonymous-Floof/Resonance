@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 mp-core.workspace = true
 mp-audio.workspace = true
+mp-net.workspace = true
 eframe.workspace = true
 egui.workspace = true
 egui_extras.workspace = true

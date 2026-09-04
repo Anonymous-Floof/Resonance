@@ -2,7 +2,11 @@
 members = ["crates/mp-core", "crates/mp-audio", "crates/mp-net", "crates/mp-ui"]
 
 [workspace.package]
-version = "0.2.0"
+# The `-networked` suffix is not decoration. This build can make requests and
+# `main` cannot, and a user should be able to tell which one they are running
+# without going looking — so it is in the window title, the log, the exported
+# bundle and the User-Agent this sends to the services it calls.
+version = "0.2.0-networked"
 edition = "2024"
 # 1.88 rather than the 1.85 that edition 2024 alone needs: the codebase uses
 # let-chains (`if let Some(x) = ... && ...`), which stabilised in 1.88.

@@ -1,12 +1,12 @@
 > [!IMPORTANT]
-> **This is the `networked` branch.** `main` is offline-absolute — no HTTP
-> client in the binary at all. This branch exists to add network features
-> openly: lyrics, artwork, artist and genre metadata, and more.
+> **This is the `networked` branch.** [`main`](../../tree/main) is
+> offline-absolute — no HTTP client in the binary at all, so there is nothing
+> to opt out of. This build can reach the network, and everything it can reach
+> is listed below and switched off until you turn it on.
 >
-> Everything below still describes the offline build, because at the branch
-> point that is exactly what this is. **The claims about having no network
-> access must be rewritten in the same commit that makes the first request** —
-> see [BRANCH.md](BRANCH.md).
+> Right now that is one thing: fetching lyrics for tracks that have none. See
+> [Online lookups](#online-lookups), and [BRANCH.md](BRANCH.md) for why the two
+> builds exist.
 
 > [!NOTE]
 > - This project was built with 99% AI assistance (Claude Opus 5+) under human oversight. 🤖
@@ -16,9 +16,10 @@
 
 A modern music player for the collection you already have.
 
-Resonance indexes your local music and plays it — no account, no streaming, no
-network. It is built for people whose music lives in folders on a disk, and who
-want something better to play it with than what came with the operating system.
+Resonance indexes your local music and plays it — no account, no streaming, and
+no lookups you did not ask for. It is built for people whose music lives in
+folders on a disk, and who want something better to play it with than what came
+with the operating system.
 
 **Windows · Rust · MIT**
 
@@ -34,6 +35,7 @@ want something better to play it with than what came with the operating system.
   - [Keyboard shortcuts](#keyboard-shortcuts)
   - [Where your files live](#where-your-files-live)
   - [Editing tags safely](#editing-tags-safely)
+  - [Online lookups](#online-lookups)
   - [Format support](#format-support)
 - [For developers](#for-developers) — build it and change it
   - [Build and run](#build-and-run)
@@ -93,7 +95,8 @@ want something better to play it with than what came with the operating system.
 **Interface**
 - Six visualizers: spectrum bars, oscilloscope, radial, waveform ribbon,
   a GPU aurora shader, and a beat-reactive particle field
-- Full-screen now-playing view with large artwork and synced lyrics
+- Full-screen now-playing view with large artwork and synced lyrics —
+  from the file, from an `.lrc` beside it, or [fetched](#online-lookups)
 - **Adaptive theming** — the accent colour is taken from the current cover and
   crossfaded as tracks change
 - Optional album-art or visualizer backgrounds behind the content and player bar
@@ -102,8 +105,12 @@ want something better to play it with than what came with the operating system.
 **Privacy and safety**
 - **Never modifies your audio files.** Tag editing is off by default, and every
   edit it does make is reversible from a history panel.
-- **No network access.** The library, the artwork and the suggestions are all
-  built on your machine.
+- **Nothing leaves your machine unless you switch it on.** Your library,
+  artwork and suggestions are all built locally and always have been. The one
+  feature that reaches out is [lyrics fetching](#online-lookups), it is off by
+  default, and Settings says exactly what it would send.
+- **Every request is written down** in a plain text file you can read, whether
+  or not it came back with anything.
 
 ---
 
@@ -241,6 +248,55 @@ files and never renames, moves, or reorganises anything on disk.
 If a file has been changed by something else since you edited it, the revert
 refuses rather than overwriting whatever did it.
 
+## Online lookups
+
+This build can look things up online. It does exactly one thing, it is **off
+until you switch it on**, and this section is the whole of what it does.
+
+### Fetching lyrics
+
+**Settings → Online → Fetch lyrics.**
+
+When it is on, opening the full-screen now-playing view on a track that has no
+lyrics in its tags and no `.lrc` file beside it asks
+[LRCLIB](https://lrclib.net) for them. LRCLIB is free, needs no account, and is
+contributed to by the people who use it.
+
+| | |
+|---|---|
+| **Where it goes** | `lrclib.net`, and nowhere else |
+| **What is sent** | The artist, title and album from that track's own tags, and its length in seconds |
+| **What is not sent** | Anything about you, your library, your file paths, or what else you listen to. There is no account and no identifier |
+| **When** | Only when you open the full-screen view, once per track, never twice |
+| **If it fails** | Nothing happens. The track has no lyrics, exactly as before |
+
+Lyrics that arrived this way say so underneath them, so you can always tell
+them from the ones that were already on your disk. **Lyrics you provide
+yourself always win** — a `.lrc` you put beside a track is never replaced by a
+fetched copy, and no request is made for a track that already has words.
+
+Answers are cached, including the misses, so a track is looked up once and then
+left alone. **Settings → Online → Clear cached lyrics** forgets them all.
+
+### Checking what it actually did
+
+Every lookup is written to a plain text file, one line each, including the ones
+that never left your machine:
+
+```
+2026-09-04T14:03:11Z	lrclib	lrclib.net	ok	5902	lyrics for "Creep" by Radiohead
+2026-09-04T14:05:02Z	lrclib	lrclib.net	not-found	0	lyrics for "untitled 3" by ---
+2026-09-04T14:07:44Z	lrclib	lrclib.net	cached	0	lyrics for "Amnesiac" by Radiohead
+```
+
+`cached` and `skipped` mean no request was made. **Settings → Online → Show the
+activity log** opens it; it lives beside the library index in
+[your data folder](#where-your-files-live), it is yours to read or delete, and
+deleting it starts a new one rather than switching the logging off.
+
+Nothing else in Resonance touches the network. Your library, artwork,
+suggestions and statistics are all built on your own machine, and always were.
+
 ## Format support
 
 Everything `symphonia` decodes: **MP3, AAC/M4A, ALAC, FLAC, Vorbis, WAV, AIFF,
@@ -307,21 +363,23 @@ Keeping them in one crate is what makes them auditable: if a request could be
 made from anywhere else, no amount of reading would tell you what the
 application talks to.
 
-**It has no transport yet.** There is no HTTP client in the crate, in the
-workspace, or in the binary, and nothing depends on `mp-net` at all — which is
-why everything this README says about working offline is still true. What is
-there is the machinery that has to come first: the activity log, the registry
-of sources (currently empty), and the rate limiter. You can check the claim
-rather than take it:
+It holds the transport, the rate limiter, the on-disk cache, the activity log,
+and a registry of every service the build can reach. `ureq` appears exactly
+once in the dependency tree, under this crate, which you can check rather than
+take on trust:
 
 ```bash
-cargo tree --workspace | grep -iE "reqwest|hyper|ureq|curl|tls"
+cargo tree --workspace -i ureq
 ```
+
+Fetchers talk to a `Transport` trait rather than to the HTTP client, so misses,
+rate limits, dead servers and garbage responses are all tested against a
+scripted fake. **No test in the workspace opens a socket.**
 
 ## Tests
 
 ```bash
-cargo test --workspace          # 760 tests
+cargo test --workspace          # 820 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```
@@ -333,7 +391,7 @@ changed. Before trusting a clean result, `cargo clean` first.
 
 ## Diagnostic examples
 
-Eight examples exist for things unit tests cannot reach. All are headless
+Nine examples exist for things unit tests cannot reach. All are headless
 unless noted.
 
 **Something will not play, or plays wrong**
@@ -373,6 +431,16 @@ cargo run --release -p mp-core --example library_probe -- "C:\path\to\music"
 Scans a folder and reports what the library made of it: counts, top artists and
 albums, sample rows, and a timed rescan. Writes to a scratch database, so it
 never touches your real library.
+
+**Lyrics are not being fetched**
+
+```bash
+cargo run -p mp-net --example lyrics_probe -- "Radiohead" "Creep" "Pablo Honey" 239
+```
+Makes one real request to LRCLIB and prints the URL, what came back and the log
+line it produced. The unit tests answer from a scripted fake, which proves the
+logic and proves nothing about whether the field names are still right. **This
+one uses the network** — it is the only example that does.
 
 **Checking for regressions**
 

@@ -447,18 +447,22 @@ impl Default for Visualizer {
 // Privacy
 // ---------------------------------------------------------------------------
 
-/// What Resonance records about you, which is the whole of the subject.
+/// What Resonance records about you, and what it asks anyone else.
 ///
-/// There is deliberately nothing here about network access. Resonance has no
-/// HTTP client and makes no requests, so a setting offering to turn networking
-/// on would be a control over something that does not exist. An earlier
-/// version carried exactly that — switches for MusicBrainz, Last.fm and
-/// artwork fetching that nothing ever read — and a settings screen full of
-/// decoration is worse than one that is simply short.
+/// This is the `networked` build. It can make requests, so there is something
+/// here to opt out of — and it is opted out of already: every network setting
+/// below starts off, and a build nobody switches on never opens a socket.
 ///
-/// Artwork comes from embedded tags and sidecar files already on disk;
-/// suggestions come from the offline analysis pass. Neither needs permission
-/// to reach anything.
+/// The history of this struct is worth keeping. An earlier version carried
+/// five network switches — MusicBrainz, Last.fm, artwork fetching and the
+/// rest — that rendered real controls and were read by no code whatsoever.
+/// They were deleted once that was noticed, and the rule taken from it is that
+/// a setting arrives in the same commit as the thing it governs, never before.
+/// [`Privacy::online_lyrics`] is the first one to earn its way back.
+///
+/// Artwork still comes only from embedded tags and sidecar files already on
+/// disk, and suggestions still come from the offline analysis pass. Neither
+/// has a switch here, because neither reaches anything.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Privacy {
@@ -470,6 +474,18 @@ pub struct Privacy {
     /// private than the machine it came from, and what you listened to and
     /// when is the most personal thing in this app.
     pub bundle_statistics: bool,
+    /// Look up lyrics online for tracks that have none on disk.
+    ///
+    /// **Off by default, and the only thing in this build that makes a
+    /// request.** With it off there is no traffic at all: not a check, not a
+    /// heartbeat, nothing.
+    ///
+    /// With it on, a track that has no `.lrc` beside it and no lyrics in its
+    /// tags causes one request to LRCLIB carrying that track's artist, title
+    /// and album as tagged, and its length. The answer is cached, so the same
+    /// track is never asked about twice. Every request is written to the
+    /// activity log, which is a plain text file the user can read.
+    pub online_lyrics: bool,
 }
 
 impl Default for Privacy {
@@ -477,6 +493,8 @@ impl Default for Privacy {
         Self {
             track_play_history: true,
             bundle_statistics: false,
+            // Off. The user opts in to this build's networking, always.
+            online_lyrics: false,
         }
     }
 }

@@ -8,10 +8,17 @@
 //! library there is nothing to discover.
 //!
 //! The second is to state the two promises the whole design rests on — that
-//! the app does not touch the user's files, and does not touch the network.
-//! Both are unusual enough to be worth saying out loud, and both are the kind
-//! of thing someone wants to know *before* they point a new program at their
-//! music collection rather than after.
+//! the app does not touch the user's files, and that it does not reach the
+//! network unless it is told to. Both are unusual enough to be worth saying
+//! out loud, and both are the kind of thing someone wants to know *before*
+//! they point a new program at their music collection rather than after.
+//!
+//! The second promise is the one that differs between the two builds, and it
+//! is stated here rather than left to the settings page precisely because this
+//! is the screen someone reads before deciding to trust the thing at all. On
+//! `main` it says nothing reaches the network, and that is absolute. Here it
+//! says the same until the user turns something on, which is a smaller promise
+//! and so has to be a more exact one.
 
 use egui::{Align, Layout, RichText, TextStyle, Ui, Vec2};
 
@@ -37,9 +44,11 @@ const PROMISES: &[(Icon, &str, &str)] = &[
     ),
     (
         Icon::Search,
-        "Everything works offline",
-        "The library, artwork and suggestions are all built on your own machine. \
-         Nothing is uploaded, and no lookups leave your computer.",
+        "Offline until you say otherwise",
+        "Your library, artwork and suggestions are all built on this machine. \
+         Nothing is uploaded, ever. Looking up lyrics online is the one thing \
+         that leaves your computer, it is switched off, and Settings lists \
+         exactly what it would send.",
     ),
 ];
 

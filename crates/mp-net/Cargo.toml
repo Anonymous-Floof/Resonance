@@ -6,17 +6,25 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# There is deliberately no HTTP client listed below, and none anywhere else in
-# the workspace. This crate is the machinery that has to exist before the first
-# request — the activity log, the source registry, the rate limiter — and it
-# has no transport yet. When one is added it belongs here and nowhere else, so
-# that `cargo tree` remains a complete answer to "what can this talk to".
+# `ureq` is the only HTTP client in the workspace, and this is the only crate
+# allowed to depend on one — so that `cargo tree` stays a complete answer to
+# "what can this talk to". Blocking rather than async on purpose: the rest of
+# the codebase is threads and channels, and a full async runtime would cost
+# more of the dependency tree than a handful of small GETs can justify.
 #
-# No dependency on mp-core either. Nothing here needs the library or the
-# settings, and staying out of them keeps merges from `main` cheap.
+# Default features minus `gzip`: the responses here are a few kilobytes of
+# JSON, so compression buys nothing and costs a decompressor in the tree.
+#
+# No dependency on mp-core. Nothing here needs the library or the settings, and
+# staying out of them keeps merges from `main` cheap — it is also why fetched
+# lyrics travel back as text and are parsed on the other side.
 [dependencies]
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 tempfile.workspace = true

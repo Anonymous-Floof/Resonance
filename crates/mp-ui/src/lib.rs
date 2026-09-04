@@ -7,6 +7,7 @@ pub mod artwork;
 pub mod fonts;
 pub mod immersive;
 pub mod library;
+pub mod lyrics_job;
 pub mod platform;
 pub mod player;
 pub mod playlists;

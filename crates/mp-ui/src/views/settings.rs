@@ -32,15 +32,59 @@ impl Changed {
 /// window splits the difference rather than starving the label entirely.
 const CONTROL_WIDTH_UNITS: f32 = 24.0;
 
-/// Live playback state the settings screen reports but does not own.
+/// Live state the settings screen reports but does not own.
 ///
-/// Grouped rather than passed loose because both are transient facts about the
-/// engine rather than settings, and the two read identically at the call site.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Live {
+/// Grouped rather than passed loose because these are all transient facts
+/// about a running session rather than settings, and they read identically at
+/// the call site.
+#[derive(Debug, Clone, Copy)]
+pub struct Live<'a> {
     pub sleep: Option<crate::player::Sleep>,
     /// Crossfades begun this session.
     pub fades: u64,
+    /// What has been looked up online, and where the record of it is.
+    pub network: Network<'a>,
+}
+
+/// What the Online section reports back to the user.
+///
+/// Counts come from the activity log's in-memory tail, so drawing this costs
+/// nothing and touches no disk.
+#[derive(Debug, Clone, Copy)]
+pub struct Network<'a> {
+    /// The service lyrics come from, so the description on screen and the code
+    /// that makes the request cannot disagree.
+    pub source: &'static mp_net::Source,
+    /// Entries in the log, including the ones that never left the machine.
+    pub entries: usize,
+    /// How many of those were actual requests.
+    pub requests: usize,
+    /// Where the log is, when it is being written to disk.
+    pub log_path: Option<&'a std::path::Path>,
+}
+
+impl Network<'_> {
+    /// One line saying what has actually happened.
+    ///
+    /// Distinguishes requests from lookups on purpose. "43 lookups, 2 of which
+    /// were requests" is the true and reassuring shape of the numbers, and
+    /// reporting only the larger one would misrepresent the traffic.
+    fn summary(&self) -> String {
+        if self.entries == 0 {
+            return "Nothing has been looked up yet, and nothing has left this machine.".to_owned();
+        }
+
+        let lookups = match self.entries {
+            1 => "1 lookup".to_owned(),
+            n => format!("{n} lookups"),
+        };
+
+        match self.requests {
+            0 => format!("{lookups} this session, none of which left this machine."),
+            1 => format!("{lookups} this session, 1 of which was a request."),
+            n => format!("{lookups} this session, {n} of which were requests."),
+        }
+    }
 }
 
 /// Actions the settings view cannot perform itself.
@@ -69,6 +113,11 @@ pub struct SettingsOutcome {
     /// are different, and only the second should disturb a running timer.
     pub set_sleep: Option<Option<crate::player::Sleep>>,
 
+    /// Open the network activity log in the system file manager.
+    pub show_activity_log: bool,
+    /// Forget every lyric fetched so far.
+    pub clear_lyrics_cache: bool,
+
     /// The output device or buffer size changed; the stream has to be
     /// reopened for it to take effect.
     ///
@@ -85,7 +134,7 @@ pub fn show(
     font_summary: &str,
     analysis: Option<crate::analysis_job::Status>,
     tag_history: &[mp_core::library::TagEdit],
-    live: Live,
+    live: Live<'_>,
 ) -> SettingsOutcome {
     let mut out = SettingsOutcome::default();
     let m = &theme.metrics;
@@ -116,6 +165,7 @@ pub fn show(
             visualizer_section(ui, theme, config, &mut out);
             backup_section(ui, theme, config, &mut out);
             shortcuts_section(ui, theme);
+            online_section(ui, theme, config, live.network, &mut out);
             privacy_section(ui, theme, config, &mut out);
 
             let after_style = (
@@ -269,7 +319,7 @@ fn playback_section(
     ui: &mut Ui,
     theme: &Theme,
     config: &mut Config,
-    live: Live,
+    live: Live<'_>,
     out: &mut SettingsOutcome,
 ) {
     section(ui, theme, "Playback", |ui| {
@@ -1132,13 +1182,87 @@ fn shortcuts_section(ui: &mut Ui, theme: &Theme) {
     });
 }
 
+/// The section that distinguishes this build from the offline one.
+///
+/// Written to be read before the switch is touched rather than after. Every
+/// sentence a user needs in order to decide is on screen: which service, what
+/// leaves the machine, how often, and where to go and check afterwards. The
+/// "what is sent" line comes from [`mp_net::Source::sends`] rather than being
+/// typed here, so the description and the code cannot drift apart.
+fn online_section(
+    ui: &mut Ui,
+    theme: &Theme,
+    config: &mut Config,
+    network: Network<'_>,
+    out: &mut SettingsOutcome,
+) {
+    let m = &theme.metrics;
+
+    section(ui, theme, "Online", |ui| {
+        note(
+            ui,
+            theme,
+            "This is the networked build of Resonance. It can look things up online, and it does nothing of the kind until you switch it on below.",
+        );
+        ui.add_space(m.space(1.0));
+
+        row(
+            ui,
+            theme,
+            "Fetch lyrics",
+            "For tracks with no lyrics in their tags and no .lrc beside them",
+            |ui| ui.checkbox(&mut config.privacy.online_lyrics, "").changed(),
+        )
+        .apply(out);
+
+        if config.privacy.online_lyrics {
+            ui.add_space(m.space(1.0));
+
+            let source = network.source;
+            note(ui, theme, &format!("Lyrics come from {}.", source.label));
+            note(ui, theme, &format!("What is sent: {}", source.sends));
+            note(
+                ui,
+                theme,
+                "One request per track, only when you open the full-screen view, and never twice for the same track. Answers are cached on this machine.",
+            );
+        }
+
+        ui.add_space(m.space(1.5));
+
+        // The log is the feature that makes any of the above checkable rather
+        // than merely stated, so it is shown whether or not fetching is on —
+        // including the case where the honest number is zero.
+        note(ui, theme, &network.summary());
+
+        ui.add_space(m.space(1.0));
+
+        ui.horizontal(|ui| {
+            if network.log_path.is_some()
+                && widgets::accent_button(ui, theme, "Show the activity log").clicked()
+            {
+                out.show_activity_log = true;
+            }
+
+            ui.add_space(m.space(0.75));
+
+            if ui
+                .button("Clear cached lyrics")
+                .on_hover_text("Forget every lyric fetched so far, so they are looked up again")
+                .clicked()
+            {
+                out.clear_lyrics_cache = true;
+            }
+        });
+    });
+}
+
 fn privacy_section(ui: &mut Ui, theme: &Theme, config: &mut Config, out: &mut SettingsOutcome) {
     section(ui, theme, "Privacy", |ui| {
         note(
             ui,
             theme,
-            "Resonance works entirely offline. It has no network client, so \
-             there is nothing here to opt out of.",
+            "Your library, artwork and suggestions are all built on this machine. The only thing that leaves it is under Online, above, and it is off unless you turn it on.",
         );
 
         row(
@@ -1395,5 +1519,69 @@ mod tests {
         ] {
             assert!(!viz_label(k).is_empty());
         }
+    }
+
+    fn network(entries: usize, requests: usize) -> Network<'static> {
+        Network {
+            source: &mp_net::source::LRCLIB,
+            entries,
+            requests,
+            log_path: None,
+        }
+    }
+
+    /// The reassuring case, and the one a user checks first.
+    #[test]
+    fn a_build_that_has_done_nothing_says_so_plainly() {
+        let summary = network(0, 0).summary();
+
+        assert!(summary.contains("Nothing has been looked up"), "{summary}");
+        assert!(
+            summary.contains("nothing has left this machine"),
+            "{summary}"
+        );
+    }
+
+    /// Cache hits and skips are lookups, not requests. Reporting the larger
+    /// number alone would overstate the traffic; reporting only the smaller
+    /// would hide that the feature is being used at all.
+    #[test]
+    fn the_summary_separates_lookups_from_requests() {
+        let summary = network(43, 2).summary();
+
+        assert!(summary.contains("43 lookups"), "{summary}");
+        assert!(summary.contains("2 of which were requests"), "{summary}");
+    }
+
+    #[test]
+    fn a_session_that_only_used_the_cache_says_nothing_left() {
+        let summary = network(12, 0).summary();
+
+        assert!(
+            summary.contains("none of which left this machine"),
+            "{summary}"
+        );
+    }
+
+    /// "1 lookups" and "1 of which were requests" both looked broken.
+    #[test]
+    fn the_summary_is_not_plural_about_one_of_anything() {
+        let summary = network(1, 1).summary();
+
+        assert!(summary.contains("1 lookup this session"), "{summary}");
+        assert!(summary.contains("1 of which was a request"), "{summary}");
+        assert!(!summary.contains("1 lookups"), "{summary}");
+    }
+
+    /// The Online section prints this straight from the source, so it has to
+    /// name the actual fields rather than say "some metadata".
+    #[test]
+    fn the_source_says_specifically_what_it_sends() {
+        let sends = mp_net::source::LRCLIB.sends;
+
+        assert!(sends.contains("artist"), "{sends}");
+        assert!(sends.contains("title"), "{sends}");
+        assert!(sends.contains("album"), "{sends}");
+        assert!(sends.contains("length"), "{sends}");
     }
 }

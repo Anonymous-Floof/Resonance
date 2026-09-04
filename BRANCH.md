@@ -27,10 +27,17 @@ branch is for.
 
 Everything the offline constraint made impossible:
 
-- Lyrics fetching
+- **Lyrics fetching** — done, via LRCLIB
 - Artwork fetching for tracks with none embedded and no sidecar
 - Artist and genre metadata, MusicBrainz-style
 - Whatever else you have planned
+
+Artwork is the natural next one and is considerably harder than lyrics was, for
+a reason worth knowing before starting: the Cover Art Archive is addressed by
+MusicBrainz release id, so it is two services and a *choice* between candidate
+releases rather than one exact-match lookup. Lyrics went first precisely
+because `/api/get` matches on artist, title, album and duration at once and so
+cannot quietly return the wrong thing.
 
 The motive here is *openness*, not permissiveness. A networked build that is
 vague about what it sends is worse than an offline one; it should be able to
@@ -92,38 +99,68 @@ That rule is not suspended here. Fetched artwork and lyrics go to the app's own
 cache, not into the music folders, and not into tags — unless tag editing is
 explicitly enabled, which is off by default and journalled for undo.
 
-## Claims that must change before this branch ships anything
+## The claims that had to change, and did
 
-These are true right now (there is still no HTTP client). They stop being true
-the moment the first request is made, and they must be updated **in that same
-commit**:
+This section was a to-do list until lyrics fetching landed. It is kept as a
+record of what the first request cost, because the next feature will owe the
+same debt and this is the shape of it.
 
-- `README.md` — "No network access at all", "with no network access and no
-  account", "nothing is looked up online", and the Privacy bullet under
-  *Listening statistics*
-- The release notes (`Safety` section)
-- `crates/mp-core/src/config.rs` — the doc comment on `struct Privacy` argues at
-  length that network settings would be controls over something that does not
-  exist. On this branch it will
-- The app name or version string should distinguish the two builds, so a user
-  can tell which one they are running without reading the settings page
+Changed in the commit that made the first request:
 
-## Suggested shape, not a mandate
+- `README.md` — the banner, the opening description, the *Privacy and safety*
+  bullets, and a new *Online lookups* section stating what is sent, to whom,
+  when, and where the log of it is
+- `crates/mp-core/src/config.rs` — the doc comment on `struct Privacy` argued
+  at length that a network setting would control something that does not exist.
+  It now introduces `online_lyrics` and explains why it is off
+- `crates/mp-ui/src/views/settings.rs` — the Privacy note said there was no
+  network client, so there was nothing to opt out of. There is now an *Online*
+  section above it
+- `crates/mp-ui/src/views/welcome.rs` — the first-run promise said no lookups
+  leave your computer. It now says one can, that it is off, and where to look
+- The version is `0.2.0-networked`, so the window title, the log, an exported
+  bundle and the outgoing `User-Agent` all name the build
+
+Two rules came out of doing it, and both are in `CLAUDE.md`:
+
+- The "what is sent" sentence lives on the `Source` and is *printed* by the
+  settings screen rather than retyped into it. A description that is typed
+  twice is a description that will disagree with itself.
+- No test may open a socket. Fetchers take a `Transport`, and checking a real
+  service is what `cargo run --example lyrics_probe` is for.
+
+## The shape it took
+
+This was a list of suggestions. All of it got built, and it held up:
 
 - **One crate, `crates/mp-net/`**, holding every outbound request. If networking
   is reachable from anywhere else, nobody can audit it — including you.
-- **Off on first run.** Opt-in, with a screen that says what each source is and
-  what it will send. `main`'s first-run flow already exists to build on.
-- **Cache aggressively to disk.** Refetching on every launch is both rude to
-  free APIs and slow. `cache_ttl_days` was the right instinct.
-- **A real User-Agent with contact details.** MusicBrainz requires one and will
-  block you without it; every other service appreciates it.
-- **Rate-limit and back off.** MusicBrainz is one request per second.
-- **An activity log the user can actually read** — what was requested, from
-  where, and when. This is the feature that makes "open about it" true rather
-  than claimed.
-- **Never block playback on a request.** Everything network-shaped is a
-  background enrichment that can fail silently and be retried later.
+- **Off on first run.** Each feature has its own switch, off by default, beside
+  the sentence saying what it would send.
+- **Cache aggressively to disk**, misses included — a library is full of tracks
+  no service has heard of, and without a negative cache those are a fresh
+  request on every launch, forever. Hits never expire; misses last a fortnight.
+- **A real User-Agent with contact details.** Name, version and project link.
+- **Rate-limit and back off.** A floor between requests taken from the source
+  itself, doubling on failure to a five-minute ceiling, cleared by one success.
+- **An activity log the user can actually read** — a plain tab-separated text
+  file, including the lookups that never left the machine. This is the feature
+  that makes "open about it" true rather than claimed.
+- **Never block playback on a request.** Everything network-shaped runs on its
+  own thread and can fail silently.
+
+Two things the list did not anticipate:
+
+- **Local always wins.** A `.lrc` the user put beside a track is the answer they
+  chose, and a fetched copy never replaces it.
+- **Say when something was fetched.** Words that came over the network are
+  labelled on screen. Showing them identically to the ones found on disk would
+  be the build quietly passing off a lookup as something it already had, and
+  that is exactly the vagueness this branch exists to avoid.
+
+One thing to carry forward: `cache_ttl_days` is still not a setting, because a
+fixed fortnight for misses needed no knob. A constant that does the job is
+better than a control that does not need to exist.
 
 ## Working across the two
 
