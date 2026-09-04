@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mp-core", "crates/mp-audio", "crates/mp-ui"]
+members = ["crates/mp-core", "crates/mp-audio", "crates/mp-net", "crates/mp-ui"]
 
 [workspace.package]
 version = "0.2.0"
@@ -13,6 +13,8 @@ license = "MIT"
 # --- internal ---
 mp-core = { path = "crates/mp-core" }
 mp-audio = { path = "crates/mp-audio" }
+# Networking, on this branch only. Nothing depends on it yet — see its lib.rs.
+mp-net = { path = "crates/mp-net" }
 mp-ui = { path = "crates/mp-ui" }
 
 # --- ui ---

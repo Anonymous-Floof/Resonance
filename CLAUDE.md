@@ -47,18 +47,25 @@ assets/              the application icon, and the script that generates it
 crates/
 ├── mp-core/         settings, paths, colour, and the library
 ├── mp-audio/        decode → resample → DSP → output; queue, device, analysis
+├── mp-net/          outbound requests and the log of them — no transport yet,
+│                    and nothing depends on it
 └── mp-ui/           theme, shell, views, widgets, visualizers
 ```
 
 `mp-core` has no UI or audio dependencies and unit-tests without a window or a
 sound device; `mp-audio` is free of UI types and can be driven headlessly. Keep
-both true — it is what makes the tests runnable at all. Add an `mp-net` rather
-than widening `mp-core`.
+both true — it is what makes the tests runnable at all.
+
+`mp-net` exists now, and **every outbound request goes in it**. No other crate
+may take an HTTP dependency; the moment one does, `cargo tree` stops being a
+complete answer to what the application can talk to, and the activity log
+becomes a partial record that looks like a whole one. It has no transport yet
+and nothing depends on it — read its `lib.rs` before adding one.
 
 ## Checks before any commit
 
 ```bash
-cargo test --workspace          # 713 tests
+cargo test --workspace          # 760 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all
 ```

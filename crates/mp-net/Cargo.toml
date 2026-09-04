@@ -1,0 +1,22 @@
+[package]
+name = "mp-net"
+description = "Outbound requests for Resonance, and the log that discloses them"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# There is deliberately no HTTP client listed below, and none anywhere else in
+# the workspace. This crate is the machinery that has to exist before the first
+# request — the activity log, the source registry, the rate limiter — and it
+# has no transport yet. When one is added it belongs here and nowhere else, so
+# that `cargo tree` remains a complete answer to "what can this talk to".
+#
+# No dependency on mp-core either. Nothing here needs the library or the
+# settings, and staying out of them keeps merges from `main` cheap.
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

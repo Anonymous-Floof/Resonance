@@ -293,6 +293,7 @@ crates/
 ├── mp-core/         settings, paths, colour, and the library:
 │                    schema, scanner, queries, playlists, similarity, tags
 ├── mp-audio/        decode → resample → DSP → output; queue, device, analysis
+├── mp-net/          outbound requests, and the log that discloses them
 └── mp-ui/           theme, shell, views, widgets, visualizers
 ```
 
@@ -301,10 +302,26 @@ unit-tests without a window or a sound device; `mp-audio` is free of UI types
 for the same reason and can be driven headlessly. A change to a button does not
 rebuild the DSP.
 
+`mp-net` is this branch's, and it is where **every** outbound request will live.
+Keeping them in one crate is what makes them auditable: if a request could be
+made from anywhere else, no amount of reading would tell you what the
+application talks to.
+
+**It has no transport yet.** There is no HTTP client in the crate, in the
+workspace, or in the binary, and nothing depends on `mp-net` at all — which is
+why everything this README says about working offline is still true. What is
+there is the machinery that has to come first: the activity log, the registry
+of sources (currently empty), and the rate limiter. You can check the claim
+rather than take it:
+
+```bash
+cargo tree --workspace | grep -iE "reqwest|hyper|ureq|curl|tls"
+```
+
 ## Tests
 
 ```bash
-cargo test --workspace          # 713 tests
+cargo test --workspace          # 760 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```
