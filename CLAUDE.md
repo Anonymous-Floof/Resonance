@@ -110,8 +110,21 @@ user publishes, after reading it. The same goes for anything else that becomes
 visible to other people: pushing a branch is fine, making a release live is
 not, and neither is opening a PR or posting a comment without being asked.
 
+**Never un-publish.** Taking a live release down is as outward-facing as
+putting one up, and it is worse, because people may already have the binary.
+
+A live release you did not expect is almost certainly the user publishing it,
+which is the whole point of drafting. Check before "correcting" anything:
+`gh release edit` preserves the draft flag, so it did not do it. This has
+happened once — a published release was read as a mistake and reverted to a
+draft, which took the user's release offline.
+
+`gh release edit --notes-file ...` is safe on a live release and edits it in
+place. If a live release genuinely needs to become a draft again, ask first.
+
 A draft release does not create its tag until it is published, which is why the
-tag is *not* pushed separately. Leave it to the publish.
+tag is *not* pushed separately. Leave it to the publish. Once published the tag
+exists and stays put, so a later version needs its own tag rather than a move.
 
 Notes are **the user's document, not a changelog of the work.** Only things a
 listener would notice: features, behaviour changes, fixes to bugs that shipped.
