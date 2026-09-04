@@ -97,6 +97,28 @@ cargo fmt --all
 All three are clean. Keep them that way — clippy included, and prefer fixing the
 cause over an `#[allow]`.
 
+## Releases
+
+**Always a draft. Never publish.**
+
+```bash
+gh release create v<version> --draft --title "..." --notes-file <file>
+```
+
+`--draft` is not optional and there is no case that justifies dropping it. The
+user publishes, after reading it. The same goes for anything else that becomes
+visible to other people: pushing a branch is fine, making a release live is
+not, and neither is opening a PR or posting a comment without being asked.
+
+A draft release does not create its tag until it is published, which is why the
+tag is *not* pushed separately. Leave it to the publish.
+
+Notes are **the user's document, not a changelog of the work.** Only things a
+listener would notice: features, behaviour changes, fixes to bugs that shipped.
+A bug introduced and fixed within the same unreleased stretch was never real to
+anyone and does not belong in the notes. Neither do refactors, test counts, or
+crate structure.
+
 ## Gotchas that have each cost real time
 
 - **egui only repaints on demand.** An idle window produces no frames, so
