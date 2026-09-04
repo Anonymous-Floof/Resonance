@@ -521,8 +521,26 @@ fn lyrics_pane(ui: &mut Ui, theme: &Theme, state: &mut Immersive, position: f64)
         ui.add_space(m.space(1.0));
     }
 
+    // egui marks a scrollable edge by fading the content into the enclosing
+    // background colour. Every other list in the app sits on a panel, so the
+    // fade matches what is behind it and reads as depth. This pane sits on
+    // nothing — the cover wash and the visualiser show straight through — so
+    // the same effect paints an opaque smear over the artwork that belongs to
+    // no surface at all, and it is at its worst against a moving background.
+    //
+    // Traded for a scroll bar that is simply always there. Same information,
+    // and it does not have to guess what colour it is sitting on.
+    let scroll = &mut ui.spacing_mut().scroll;
+    scroll.fade.strength = 0.0;
+    scroll.dormant_handle_opacity = scroll.active_handle_opacity;
+    // Thicker than egui's dormant default, which is tuned for a bar that only
+    // has to be found once the pointer is already near it. This one is the
+    // whole indication that there is more to read.
+    scroll.floating_width = m.space(0.5);
+
     egui::ScrollArea::vertical()
         .id_salt("immersive_lyrics")
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
         .auto_shrink([false, false])
         .show(ui, |ui| {
             // Half a pane of padding at each end, so the first and last lines
