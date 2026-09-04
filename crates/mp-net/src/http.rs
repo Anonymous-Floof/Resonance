@@ -31,7 +31,16 @@ use crate::error::NetError;
 ///
 /// Generous enough for a slow connection, short enough that a hung request
 /// does not pin a worker thread for the rest of the session.
-pub const TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// Raised from ten seconds after a first run over a real library timed out on
+/// four requests of twenty-three. A MusicBrainz *search* is a much heavier
+/// query than the direct lookups this started out making, and ten seconds was
+/// tight enough that ordinary slowness read as a failure — which also backs
+/// the rate limiter off and makes the next request likelier to fail too.
+/// Everything using this is a background pass nobody is waiting on, so the
+/// cost of waiting longer is nothing and the cost of giving up early is a
+/// missing cover.
+pub const TIMEOUT: Duration = Duration::from_secs(25);
 
 /// The largest response body that will be read.
 ///

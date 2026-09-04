@@ -512,7 +512,7 @@ scripted fake. **No test in the workspace opens a socket.**
 ## Tests
 
 ```bash
-cargo test --workspace          # 880 tests
+cargo test --workspace          # 884 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```

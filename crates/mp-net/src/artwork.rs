@@ -179,21 +179,33 @@ struct Candidate {
 struct ArtistCredit {
     #[serde(default)]
     name: String,
+    /// What separates this part from the next: `" feat. "`, `" & "`, `", "`.
+    ///
+    /// MusicBrainz stores the punctuation between credited artists rather than
+    /// leaving it to be guessed, and it is empty on the last part.
+    #[serde(default)]
+    joinphrase: String,
 }
 
 impl Candidate {
-    /// The full credited artist, joined as MusicBrainz presents it.
+    /// The full credited artist, exactly as MusicBrainz writes it.
     ///
-    /// A collaboration is credited as several parts which read as one name, so
-    /// they are joined rather than compared one at a time — otherwise a
-    /// release by two artists would never match a tag naming both.
+    /// A collaboration is stored as several parts with the punctuation between
+    /// them carried in `joinphrase`, so the parts have to be reassembled
+    /// rather than joined with a separator of our own choosing. Inventing one
+    /// turns `League of Legends feat. Against the Current` into
+    /// `League of Legends & Against the Current`, which matches neither what
+    /// MusicBrainz displays nor what anybody would have in a tag — and that
+    /// was found rejecting real albums that ought to have matched.
     fn artist(&self) -> String {
-        self.artist_credit
-            .iter()
-            .map(|credit| credit.name.trim())
-            .filter(|name| !name.is_empty())
-            .collect::<Vec<_>>()
-            .join(" & ")
+        let mut credit = String::new();
+
+        for part in &self.artist_credit {
+            credit.push_str(&part.name);
+            credit.push_str(&part.joinphrase);
+        }
+
+        credit.trim().to_owned()
     }
 }
 
@@ -711,16 +723,46 @@ mod tests {
         assert!(client.fetch(&query()).is_some());
     }
 
-    /// A collaboration is credited in parts that read as one name.
+    /// A collaboration is credited in parts that read as one name, with the
+    /// punctuation between them carried by the service rather than guessed.
     #[test]
-    fn a_joint_credit_is_compared_as_one_name() {
+    fn a_joint_credit_is_reassembled_the_way_the_service_writes_it() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let body = r#"{"releases":[{"id":"1","title":"Watch the Throne","artist-credit":[{"name":"Jay-Z"},{"name":"Kanye West"}]}]}"#;
+        let body = r#"{"releases":[{"id":"1","title":"Watch the Throne","artist-credit":[{"name":"Jay-Z","joinphrase":" & "},{"name":"Kanye West"}]}]}"#;
         let fake = Fake::new(vec![Fake::ok(body)], vec![Fake::image(PNG, None)]);
         let client = client(Arc::clone(&fake), &dir);
 
         let query = Query::new("Jay-Z & Kanye West", "Watch the Throne");
         assert!(client.fetch(&query).is_some());
+    }
+
+    /// The case that was silently failing: "feat." is not "&", and assuming
+    /// otherwise rejected releases that were the right ones.
+    #[test]
+    fn a_featured_artist_keeps_the_services_own_wording() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let body = r#"{"releases":[{"id":"1","title":"Legends Never Die","artist-credit":[{"name":"League of Legends","joinphrase":" feat. "},{"name":"Against the Current"}]}]}"#;
+        let fake = Fake::new(vec![Fake::ok(body)], vec![Fake::image(PNG, None)]);
+        let client = client(Arc::clone(&fake), &dir);
+
+        let query = Query::new(
+            "League of Legends feat. Against the Current",
+            "Legends Never Die",
+        );
+        assert!(
+            client.fetch(&query).is_some(),
+            "a credit joined with feat. should match a tag written the same way"
+        );
+    }
+
+    /// A single credited artist has an empty joinphrase and must not gain one.
+    #[test]
+    fn a_lone_artist_is_unchanged() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fake = Fake::new(vec![Fake::ok(MATCH)], vec![Fake::image(PNG, None)]);
+        let client = client(Arc::clone(&fake), &dir);
+
+        assert!(client.fetch(&query()).is_some());
     }
 
     /// Punctuation is left alone: these are genuinely different releases.

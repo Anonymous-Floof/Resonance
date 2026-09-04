@@ -1969,9 +1969,14 @@ impl ResonanceApp {
         // Selected in its folder rather than opened, because what opens a
         // `.log` file varies by machine and a folder always works.
         #[cfg(windows)]
-        let launched = std::process::Command::new("explorer")
-            .arg(format!("/select,{}", path.display()))
-            .spawn();
+        let launched = {
+            use std::os::windows::process::CommandExt;
+
+            // `raw_arg` rather than `arg`; see `select_argument`.
+            std::process::Command::new("explorer")
+                .raw_arg(select_argument(&path))
+                .spawn()
+        };
 
         #[cfg(not(windows))]
         let launched = std::process::Command::new("xdg-open")
@@ -3350,4 +3355,55 @@ fn file_label(path: &std::path::Path) -> String {
         || path.display().to_string(),
         |name| name.to_string_lossy().into(),
     )
+}
+
+/// Explorer's `/select` argument, quoted the way Explorer actually wants it.
+///
+/// The quotes belong around the *path*, not around the whole argument, which
+/// is why this cannot go through `Command::arg`. Rust quotes any argument
+/// containing a space as a single unit, which yields
+/// `"/select,C:\Some Folder\x.log"` — and Explorer, no longer seeing
+/// `/select,` as a switch, silently ignores the whole thing and opens the
+/// user's Documents folder instead.
+///
+/// So the button worked in a normal install, where the log sits under
+/// `%APPDATA%` and no component has a space in it, and failed in portable
+/// mode beside an executable in a folder that does. Found by a user who
+/// noticed it opening Documents.
+#[cfg(windows)]
+fn select_argument(path: &std::path::Path) -> String {
+    format!("/select,\"{}\"", path.display())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// The switch has to sit outside the quotes or Explorer does not see it.
+    #[test]
+    fn a_path_with_spaces_is_quoted_without_swallowing_the_switch() {
+        let argument = select_argument(Path::new(
+            r"D:\Code Projects\Resonance-data\data\network-activity.log",
+        ));
+
+        assert!(
+            argument.starts_with("/select,\""),
+            "the switch must not be inside the quotes: {argument}"
+        );
+        assert!(argument.ends_with("network-activity.log\""), "{argument}");
+    }
+
+    /// The default install has no spaces, and must keep working.
+    #[test]
+    fn a_path_without_spaces_is_quoted_the_same_way() {
+        let argument = select_argument(Path::new(
+            r"C:\Users\Someone\AppData\Roaming\Resonance\data\network-activity.log",
+        ));
+
+        assert_eq!(
+            argument,
+            "/select,\"C:\\Users\\Someone\\AppData\\Roaming\\Resonance\\data\\network-activity.log\""
+        );
+    }
 }
