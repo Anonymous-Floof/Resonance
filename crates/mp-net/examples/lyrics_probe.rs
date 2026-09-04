@@ -7,20 +7,33 @@
 //! ```bash
 //! cargo run -p mp-net --example lyrics_probe -- "Radiohead" "Creep" "Pablo Honey" 239
 //! ```
+//!
+//! Pass `--any-release` to allow the relaxed retry, which is the quickest way
+//! to see whether a track that misses is missing altogether or merely tagged
+//! with an album and duration nothing recognises.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use mp_net::Activity;
-use mp_net::lyrics::{Client, Query};
+use mp_net::lyrics::{Client, Match, Query};
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+
+    let matching = if let Some(flag) = args.iter().position(|a| a == "--any-release") {
+        args.remove(flag);
+        Match::AnyRelease
+    } else {
+        Match::Exact
+    };
 
     let (artist, title) = match args.as_slice() {
         [artist, title, ..] => (artist.clone(), title.clone()),
         _ => {
-            eprintln!("usage: lyrics_probe <artist> <title> [album] [duration-seconds]");
+            eprintln!(
+                "usage: lyrics_probe [--any-release] <artist> <title> [album] [duration-seconds]"
+            );
             std::process::exit(2);
         }
     };
@@ -41,18 +54,26 @@ fn main() {
 
     println!("GET {}", query.url());
 
-    match client.fetch(&query) {
+    match client.fetch(&query, matching) {
         Some(found) => {
             println!("  synced:       {}", found.is_synced());
             println!("  instrumental: {}", found.instrumental);
 
             match found.best() {
-                // One line only. The point is to prove the shape came back,
-                // not to print somebody else's lyrics to a terminal.
+                // The shape of the answer, not the answer itself. Whether the
+                // words arrived and parsed is what this is checking, and that
+                // is fully answered by the count and the first timestamp —
+                // printing somebody else's lyrics to a terminal is not the
+                // probe's business.
                 Some(text) => {
-                    let first = text.lines().next().unwrap_or_default();
                     println!("  lines:        {}", text.lines().count());
-                    println!("  first line:   {first}");
+                    println!(
+                        "  starts at:    {}",
+                        text.lines()
+                            .find_map(|line| line.split(']').next())
+                            .map(|stamp| stamp.trim_start_matches('['))
+                            .unwrap_or("no timestamp")
+                    );
                 }
                 None => println!("  no words (instrumental)"),
             }

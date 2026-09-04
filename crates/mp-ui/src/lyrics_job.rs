@@ -29,7 +29,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use mp_core::library::Lyrics;
 use mp_core::library::lyrics;
 use mp_net::Activity;
-use mp_net::lyrics::{Client, Query};
+use mp_net::lyrics::{Client, Match, Query};
 
 use crate::player::NowPlaying;
 
@@ -37,6 +37,9 @@ use crate::player::NowPlaying;
 struct Job {
     path: PathBuf,
     query: Query,
+    /// Carried per job rather than read on the worker, so a job already in
+    /// flight finishes under the policy it was sent with.
+    matching: Match,
 }
 
 /// What it sends back. `None` means asked and answered with nothing.
@@ -51,6 +54,8 @@ pub struct LyricsJob {
     known: HashMap<PathBuf, Option<Lyrics>>,
     /// Tracks currently in flight, so one is not asked about twice.
     pending: HashSet<PathBuf>,
+    /// How hard to look, from the user's settings.
+    matching: Match,
 }
 
 impl std::fmt::Debug for LyricsJob {
@@ -81,7 +86,7 @@ impl LyricsJob {
 
                 // Ends when the sender is dropped, which is when the app quits.
                 while let Ok(job) = incoming.recv() {
-                    let found = client.fetch(&job.query).and_then(|fetched| {
+                    let found = client.fetch(&job.query, job.matching).and_then(|fetched| {
                         let text = fetched.best()?;
                         Some(lyrics::parse(
                             text,
@@ -109,6 +114,7 @@ impl LyricsJob {
             answers,
             known: HashMap::new(),
             pending: HashSet::new(),
+            matching: Match::default(),
         })
     }
 
@@ -154,6 +160,7 @@ impl LyricsJob {
             .send(Job {
                 path: track.path.clone(),
                 query,
+                matching: self.matching,
             })
             .is_err()
         {
@@ -161,6 +168,24 @@ impl LyricsJob {
             self.pending.remove(&track.path);
             self.known.insert(track.path.clone(), None);
         }
+    }
+
+    /// Set how hard to look, from the settings.
+    ///
+    /// Loosening it discards the misses recorded so far, because those were
+    /// decided under the stricter rule and the looser one may well find them.
+    /// The hits are kept: they are already the best answer available.
+    pub fn set_matching(&mut self, matching: Match) {
+        if self.matching == matching {
+            return;
+        }
+
+        self.matching = matching;
+        self.known.retain(|_, found| found.is_some());
+    }
+
+    pub fn matching(&self) -> Match {
+        self.matching
     }
 
     /// The answer for a track, once there is one.
@@ -307,5 +332,73 @@ mod tests {
         .expect("start");
 
         assert!(!job.poll());
+    }
+
+    /// Turning the fallback on has to reconsider the tracks that already
+    /// missed, or the setting appears to do nothing until the app restarts.
+    #[test]
+    fn loosening_the_match_forgets_the_misses_it_might_now_find() {
+        let ctx = egui::Context::default();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut job = LyricsJob::start(
+            dir.path().to_path_buf(),
+            Arc::new(mp_net::Activity::in_memory()),
+            ctx,
+        )
+        .expect("start");
+
+        let missed = PathBuf::from("C:/music/Missed.mp3");
+        let found = PathBuf::from("C:/music/Found.mp3");
+        job.known.insert(missed.clone(), None);
+        job.known.insert(
+            found.clone(),
+            Some(lyrics::parse("Words", lyrics::Source::Embedded)),
+        );
+
+        job.set_matching(Match::AnyRelease);
+
+        assert!(
+            job.answer(&missed).is_none(),
+            "the miss should be open to being asked again"
+        );
+        assert!(
+            job.answer(&found).is_some(),
+            "a hit is already the best answer there is"
+        );
+    }
+
+    /// Pushed from the settings every frame, so a repeat must not keep
+    /// clearing the memo and re-asking for every track.
+    #[test]
+    fn setting_the_same_match_again_changes_nothing() {
+        let ctx = egui::Context::default();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut job = LyricsJob::start(
+            dir.path().to_path_buf(),
+            Arc::new(mp_net::Activity::in_memory()),
+            ctx,
+        )
+        .expect("start");
+
+        job.set_matching(Match::AnyRelease);
+        job.known.insert(PathBuf::from("C:/music/Missed.mp3"), None);
+
+        job.set_matching(Match::AnyRelease);
+
+        assert_eq!(job.known.len(), 1, "the memo was cleared for no reason");
+    }
+
+    #[test]
+    fn a_new_job_looks_for_the_exact_recording() {
+        let ctx = egui::Context::default();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let job = LyricsJob::start(
+            dir.path().to_path_buf(),
+            Arc::new(mp_net::Activity::in_memory()),
+            ctx,
+        )
+        .expect("start");
+
+        assert_eq!(job.matching(), Match::Exact);
     }
 }

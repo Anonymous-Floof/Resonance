@@ -2029,12 +2029,22 @@ impl ResonanceApp {
             _ => {}
         }
 
-        // An answer that landed while the window was idle produced no frame of
-        // its own; the worker asks for one, and this picks it up.
-        if let Some(job) = &mut self.lyrics_job
-            && job.poll()
-        {
-            ctx.request_repaint();
+        let matching = if self.config.privacy.online_lyrics_any_release {
+            mp_net::lyrics::Match::AnyRelease
+        } else {
+            mp_net::lyrics::Match::Exact
+        };
+
+        if let Some(job) = &mut self.lyrics_job {
+            // Pushed every frame rather than watched for changes: it is a
+            // comparison of two enum values, and the job ignores a repeat.
+            job.set_matching(matching);
+
+            // An answer that landed while the window was idle produced no
+            // frame of its own; the worker asks for one, this picks it up.
+            if job.poll() {
+                ctx.request_repaint();
+            }
         }
     }
 

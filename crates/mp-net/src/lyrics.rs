@@ -48,6 +48,44 @@ pub const CACHE_NAMESPACE: &str = "lyrics";
 // The question
 // ---------------------------------------------------------------------------
 
+/// How hard to look.
+///
+/// The difference matters for a library ripped from YouTube, where the artist
+/// is a channel name, the album is missing or invented and the duration is a
+/// second or two off the official release. Under [`Match::Exact`] every one of
+/// those is a miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Match {
+    /// Artist, title, album and duration must all agree.
+    ///
+    /// One answer or none, and the answer is the same recording the user is
+    /// listening to — so synced timings line up exactly.
+    #[default]
+    Exact,
+
+    /// Fall back to artist and title alone when the exact lookup misses.
+    ///
+    /// Still an exact match on the two fields that identify the *song*, so it
+    /// cannot return a different song — only a different release of the same
+    /// one. That is the trade: many more hits on a scrappily tagged library,
+    /// and timings that belong to some other pressing and may drift.
+    ///
+    /// Opt-in for that reason. It is a second request, and only on tracks the
+    /// strict lookup has already failed to find.
+    AnyRelease,
+}
+
+/// The result of asking one question.
+///
+/// Distinguishes "asked, and there is no answer" from "could not ask", which
+/// [`Client::fetch`] needs in order to decide whether a second, looser attempt
+/// is worth making — retrying an outage twice just backs the limiter off twice.
+enum Answer {
+    Found(Fetched),
+    Missing,
+    Unavailable,
+}
+
 /// What is being looked up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Query {
@@ -88,16 +126,43 @@ impl Query {
         !self.artist.trim().is_empty() && !self.title.trim().is_empty()
     }
 
+    /// The same question with the release-specific parts dropped.
+    ///
+    /// Artist and title are kept, because those identify the song and dropping
+    /// either would make the lookup capable of returning something else
+    /// entirely. Album and duration are what tie it to one pressing.
+    pub fn relaxed(&self) -> Self {
+        Self {
+            artist: self.artist.clone(),
+            title: self.title.clone(),
+            album: None,
+            duration: None,
+        }
+    }
+
+    /// Whether this pins the lookup to one particular release.
+    pub fn names_a_release(&self) -> bool {
+        self.album.is_some() || self.duration.is_some()
+    }
+
     /// How this reads in the activity log.
     ///
     /// The user should recognise the track, so it is the same words they see
-    /// in the player, not an opaque key.
+    /// in the player, not an opaque key. A lookup that named no release says
+    /// so, since two lines for one track would otherwise look like a bug
+    /// rather than the fallback doing its job.
     pub fn subject(&self) -> String {
-        format!(
+        let subject = format!(
             "lyrics for \"{}\" by {}",
             self.title.trim(),
             self.artist.trim()
-        )
+        );
+
+        if self.names_a_release() {
+            subject
+        } else {
+            format!("{subject} (any release)")
+        }
     }
 
     /// The cache key. Album and duration are part of it because they are part
@@ -301,18 +366,53 @@ impl Client {
     ///
     /// Answers `None` for a miss, a failure, or an unanswerable query. The
     /// activity log carries which of those it was.
-    pub fn fetch(&self, query: &Query) -> Option<Fetched> {
+    pub fn fetch(&self, query: &Query, matching: Match) -> Option<Fetched> {
         if !query.is_answerable() {
             // Not logged: nothing was going to be sent, and an entry per
             // untagged file would bury the requests that did happen.
             return None;
         }
 
+        match self.lookup(query) {
+            Answer::Found(fetched) => Some(fetched),
+
+            // The service could not be asked. Asking it a second, easier
+            // question would fail identically and back the limiter off twice
+            // for one outage.
+            Answer::Unavailable => None,
+
+            Answer::Missing => {
+                if matching != Match::AnyRelease {
+                    return None;
+                }
+
+                let relaxed = query.relaxed();
+
+                // Nothing to relax: the tags carried no album and no duration,
+                // so this was already the loose question and repeating it
+                // would be the same request twice.
+                if relaxed == *query {
+                    return None;
+                }
+
+                match self.lookup(&relaxed) {
+                    Answer::Found(fetched) => Some(fetched),
+                    Answer::Missing | Answer::Unavailable => None,
+                }
+            }
+        }
+    }
+
+    /// One question, asked once: the cache, and then the network.
+    fn lookup(&self, query: &Query) -> Answer {
         let key = query.cache_key();
 
         if let Some(entry) = self.cache.read::<Fetched>(&key) {
             self.log(query, Outcome::Cached, 0, None);
-            return entry.found;
+            return match entry.found {
+                Some(fetched) => Answer::Found(fetched),
+                None => Answer::Missing,
+            };
         }
 
         match self.request(query) {
@@ -320,13 +420,13 @@ impl Client {
                 self.limiter.note_success();
                 self.store(&key, CacheEntry::found(fetched.clone()));
                 self.log(query, Outcome::Ok, bytes, None);
-                Some(fetched)
+                Answer::Found(fetched)
             }
             Err(NetError::NotFound) => {
                 self.limiter.note_success();
                 self.store(&key, CacheEntry::<Fetched>::missing());
                 self.log(query, Outcome::NotFound, 0, None);
-                None
+                Answer::Missing
             }
             Err(error) => {
                 if error.is_failure() {
@@ -336,7 +436,7 @@ impl Client {
                 // track, and recording it would turn one bad hour of
                 // connectivity into a fortnight of missing lyrics.
                 self.log(query, error.outcome(), 0, Some(error.to_string()));
-                None
+                Answer::Unavailable
             }
         }
     }
@@ -588,10 +688,12 @@ mod tests {
         let fake = Fake::new(vec![Fake::ok(SYNCED)]);
         let client = client(Arc::clone(&fake), &dir);
 
-        let first = client.fetch(&query()).expect("a hit");
+        let first = client.fetch(&query(), Match::Exact).expect("a hit");
         assert_eq!(first.best(), Some("[00:01.00]I"));
 
-        let second = client.fetch(&query()).expect("served from the cache");
+        let second = client
+            .fetch(&query(), Match::Exact)
+            .expect("served from the cache");
         assert_eq!(second.best(), Some("[00:01.00]I"));
 
         assert_eq!(fake.calls(), 1, "the second lookup should not have asked");
@@ -605,8 +707,8 @@ mod tests {
         let fake = Fake::new(vec![Err(NetError::NotFound)]);
         let client = client(Arc::clone(&fake), &dir);
 
-        assert!(client.fetch(&query()).is_none());
-        assert!(client.fetch(&query()).is_none());
+        assert!(client.fetch(&query(), Match::Exact).is_none());
+        assert!(client.fetch(&query(), Match::Exact).is_none());
 
         assert_eq!(fake.calls(), 1, "the miss should have been remembered");
     }
@@ -622,8 +724,14 @@ mod tests {
         ]);
         let client = client(Arc::clone(&fake), &dir);
 
-        assert!(client.fetch(&query()).is_none(), "the network was down");
-        assert!(client.fetch(&query()).is_some(), "and then it came back");
+        assert!(
+            client.fetch(&query(), Match::Exact).is_none(),
+            "the network was down"
+        );
+        assert!(
+            client.fetch(&query(), Match::Exact).is_some(),
+            "and then it came back"
+        );
 
         assert_eq!(fake.calls(), 2);
     }
@@ -637,7 +745,11 @@ mod tests {
             Arc::new(Activity::in_memory()),
         );
 
-        assert!(client.fetch(&Query::new("", "Track 03")).is_none());
+        assert!(
+            client
+                .fetch(&Query::new("", "Track 03"), Match::Exact)
+                .is_none()
+        );
     }
 
     /// A record with no words in it is a miss, whatever the status code said.
@@ -647,7 +759,7 @@ mod tests {
         let fake = Fake::new(vec![Fake::ok(r#"{"id":1,"instrumental":false}"#)]);
         let client = client(Arc::clone(&fake), &dir);
 
-        assert!(client.fetch(&query()).is_none());
+        assert!(client.fetch(&query(), Match::Exact).is_none());
     }
 
     /// An instrumental is a real answer, and worth remembering so the track is
@@ -658,11 +770,13 @@ mod tests {
         let fake = Fake::new(vec![Fake::ok(r#"{"id":1,"instrumental":true}"#)]);
         let client = client(Arc::clone(&fake), &dir);
 
-        let answer = client.fetch(&query()).expect("instrumental is an answer");
+        let answer = client
+            .fetch(&query(), Match::Exact)
+            .expect("instrumental is an answer");
         assert!(answer.instrumental);
         assert!(answer.is_empty(), "and there is nothing to show");
 
-        client.fetch(&query());
+        client.fetch(&query(), Match::Exact);
         assert_eq!(fake.calls(), 1, "it should have been cached");
     }
 
@@ -672,7 +786,7 @@ mod tests {
         let fake = Fake::new(vec![Fake::ok("<html>not json at all</html>")]);
         let client = client(Arc::clone(&fake), &dir);
 
-        assert!(client.fetch(&query()).is_none());
+        assert!(client.fetch(&query(), Match::Exact).is_none());
     }
 
     // -- the log -----------------------------------------------------------
@@ -689,8 +803,8 @@ mod tests {
             Arc::clone(&activity),
         );
 
-        client.fetch(&query());
-        client.fetch(&query());
+        client.fetch(&query(), Match::Exact);
+        client.fetch(&query(), Match::Exact);
 
         let recent = activity.recent();
         assert_eq!(recent.len(), 2, "both lookups, not just the request");
@@ -721,7 +835,7 @@ mod tests {
             Arc::clone(&activity),
         );
 
-        client.fetch(&query());
+        client.fetch(&query(), Match::Exact);
 
         let recent = activity.recent();
         assert_eq!(recent[0].outcome, Outcome::Failed);
@@ -740,7 +854,7 @@ mod tests {
 
         let client = Client::with_transport(Box::new(Forbidden), dir.path(), Arc::clone(&activity));
 
-        client.fetch(&Query::new("", ""));
+        client.fetch(&Query::new("", ""), Match::Exact);
 
         assert!(activity.is_empty());
     }
@@ -753,7 +867,7 @@ mod tests {
         let fake = Fake::new(vec![Fake::ok(SYNCED)]);
         let client = client(Arc::clone(&fake), &dir);
 
-        client.fetch(&query());
+        client.fetch(&query(), Match::Exact);
 
         for url in fake.urls() {
             assert!(url.contains("/api/get?"), "{url}");
@@ -769,7 +883,7 @@ mod tests {
         let fake = Fake::new(vec![Fake::ok(SYNCED)]);
         let client = client(Arc::clone(&fake), &dir);
 
-        client.fetch(&query());
+        client.fetch(&query(), Match::Exact);
 
         for url in fake.urls() {
             assert!(
@@ -777,5 +891,153 @@ mod tests {
                 "{url} is not the host the source declares"
             );
         }
+    }
+
+    // -- the relaxed fallback ----------------------------------------------
+
+    /// The YouTube-rip case: the album and duration in the tags do not match
+    /// any release, so the strict lookup misses and the looser one answers.
+    #[test]
+    fn a_missed_exact_lookup_falls_back_to_any_release() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fake = Fake::new(vec![Err(NetError::NotFound), Fake::ok(SYNCED)]);
+        let client = client(Arc::clone(&fake), &dir);
+
+        let found = client
+            .fetch(&query(), Match::AnyRelease)
+            .expect("the fallback should have answered");
+        assert_eq!(found.best(), Some("[00:01.00]I"));
+
+        let urls = fake.urls();
+        assert_eq!(urls.len(), 2);
+        assert!(
+            urls[0].contains("album_name="),
+            "the first tried the release"
+        );
+        assert!(urls[0].contains("duration="), "{}", urls[0]);
+        assert!(
+            !urls[1].contains("album_name=") && !urls[1].contains("duration="),
+            "the retry should drop the release: {}",
+            urls[1]
+        );
+        assert!(urls[1].contains("artist_name=Radiohead"), "{}", urls[1]);
+        assert!(urls[1].contains("track_name=Creep"), "{}", urls[1]);
+    }
+
+    /// Opt-in means opt-in. The default must ask once and stop.
+    #[test]
+    fn the_fallback_does_not_happen_unless_it_is_asked_for() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fake = Fake::new(vec![Err(NetError::NotFound), Fake::ok(SYNCED)]);
+        let client = client(Arc::clone(&fake), &dir);
+
+        assert!(client.fetch(&query(), Match::Exact).is_none());
+        assert_eq!(fake.calls(), 1, "a second request was made unasked");
+    }
+
+    /// A hit on the strict lookup is the answer. Asking again would be a
+    /// wasted request and could replace the right recording with another.
+    #[test]
+    fn a_successful_exact_lookup_never_falls_back() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fake = Fake::new(vec![Fake::ok(SYNCED)]);
+        let client = client(Arc::clone(&fake), &dir);
+
+        assert!(client.fetch(&query(), Match::AnyRelease).is_some());
+        assert_eq!(fake.calls(), 1);
+    }
+
+    /// An outage is not a miss. Retrying it immediately would fail the same
+    /// way and back the limiter off twice for one problem.
+    #[test]
+    fn a_failure_does_not_trigger_the_fallback() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fake = Fake::new(vec![Err(NetError::Transport("no route".into()))]);
+        let client = client(Arc::clone(&fake), &dir);
+
+        assert!(client.fetch(&query(), Match::AnyRelease).is_none());
+        assert_eq!(fake.calls(), 1, "the outage was retried");
+    }
+
+    /// With no album and no duration in the tags there is nothing to relax, so
+    /// the fallback would repeat the identical request.
+    #[test]
+    fn a_query_with_nothing_to_relax_is_not_asked_twice() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fake = Fake::new(vec![Err(NetError::NotFound)]);
+        let client = client(Arc::clone(&fake), &dir);
+
+        let bare = Query::new("Radiohead", "Creep");
+        assert!(client.fetch(&bare, Match::AnyRelease).is_none());
+
+        assert_eq!(fake.calls(), 1, "the same question was asked twice");
+    }
+
+    /// Both halves are cached under their own keys, so a track that needed the
+    /// fallback once does not need two requests again.
+    #[test]
+    fn both_attempts_are_cached() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fake = Fake::new(vec![Err(NetError::NotFound), Fake::ok(SYNCED)]);
+        let client = client(Arc::clone(&fake), &dir);
+
+        assert!(client.fetch(&query(), Match::AnyRelease).is_some());
+        assert_eq!(fake.calls(), 2);
+
+        assert!(
+            client.fetch(&query(), Match::AnyRelease).is_some(),
+            "the second time should come entirely from the cache"
+        );
+        assert_eq!(fake.calls(), 2, "nothing more should have been requested");
+    }
+
+    /// Two log lines for one track look like a bug unless the second says why
+    /// it exists.
+    #[test]
+    fn the_fallback_says_in_the_log_that_it_named_no_release() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let activity = Arc::new(Activity::in_memory());
+        let fake = Fake::new(vec![Err(NetError::NotFound), Fake::ok(SYNCED)]);
+
+        let client = Client::with_transport(
+            Box::new(ScriptedRef(fake)),
+            dir.path(),
+            Arc::clone(&activity),
+        );
+
+        client.fetch(&query(), Match::AnyRelease);
+
+        let recent = activity.recent();
+        assert_eq!(recent.len(), 2);
+
+        assert_eq!(recent[1].outcome, Outcome::NotFound);
+        assert_eq!(recent[1].subject, "lyrics for \"Creep\" by Radiohead");
+
+        assert_eq!(recent[0].outcome, Outcome::Ok);
+        assert_eq!(
+            recent[0].subject,
+            "lyrics for \"Creep\" by Radiohead (any release)"
+        );
+    }
+
+    #[test]
+    fn relaxing_keeps_the_song_and_drops_the_release() {
+        let relaxed = query().relaxed();
+
+        assert_eq!(relaxed.artist, "Radiohead");
+        assert_eq!(relaxed.title, "Creep");
+        assert_eq!(relaxed.album, None);
+        assert_eq!(relaxed.duration, None);
+
+        assert!(query().names_a_release());
+        assert!(!relaxed.names_a_release());
+        assert_eq!(relaxed.relaxed(), relaxed, "relaxing twice changes nothing");
+    }
+
+    /// The strict lookup is the default everywhere, including for anything
+    /// that forgets to say which it wants.
+    #[test]
+    fn matching_defaults_to_exact() {
+        assert_eq!(Match::default(), Match::Exact);
     }
 }

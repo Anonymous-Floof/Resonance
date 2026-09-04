@@ -278,6 +278,25 @@ fetched copy, and no request is made for a track that already has words.
 Answers are cached, including the misses, so a track is looked up once and then
 left alone. **Settings → Online → Clear cached lyrics** forgets them all.
 
+### Try other releases
+
+**Settings → Online → Try other releases.** Off by default.
+
+The lookup above matches artist, title, album *and* length together, so it
+either finds the exact recording you are playing or finds nothing at all. That
+is what stops it ever putting the wrong words on a song — but it also means one
+wrong tag is a miss, and [tags are often wrong](#known-limitation-lookups-are-only-as-good-as-your-tags).
+
+With this on, a track the exact lookup could not find is asked about a second
+time using only the artist and title. That is still an exact match on the two
+fields that identify the *song*, so it cannot return a different song — only a
+different release of the same one.
+
+The trade is timing. Words found this way belong to some other pressing, so if
+they are synced they may drift against what you are actually hearing. Plain
+lyrics are unaffected. It also costs one extra request, and only on tracks that
+have already missed.
+
 ### Checking what it actually did
 
 Every lookup is written to a plain text file, one line each, including the ones
@@ -293,6 +312,51 @@ that never left your machine:
 activity log** opens it; it lives beside the library index in
 [your data folder](#where-your-files-live), it is yours to read or delete, and
 deleting it starts a new one rather than switching the logging off.
+
+### Known limitation: lookups are only as good as your tags
+
+**This is the main reason a lookup comes back with nothing, and it is worth
+understanding before you conclude the feature is broken.**
+
+Resonance does not send the audio anywhere. It has no idea what a track
+*sounds* like, so every online lookup is made from the text in the file's own
+tags. When those tags do not match what the rest of the world calls the same
+recording, the answer is nothing at all.
+
+Files saved from YouTube are the classic case, and they tend to be wrong in all
+four fields at once:
+
+| Field | What a YouTube rip usually has | What the service expects |
+|---|---|---|
+| Artist | The channel name — `SomeChannel`, `… - Topic`, `…VEVO` | The performing artist |
+| Title | Decorated — `(Official Video)`, `[HD]`, `(Lyrics)` | The plain track title |
+| Album | Missing, or the channel name again | The release it appeared on |
+| Duration | A second or two out, from added intros or trailing silence | The release duration |
+
+Resonance already cleans up what it can *prove* at scan time — `- Topic`
+suffixes, download-site watermarks, titles that repeat their own artist — but
+it deliberately stops there rather than inventing metadata, so plenty survives.
+
+Two further things make this worse for some collections than others:
+
+- **Covers, remixes and fan songs.** Where many artists have recorded a song
+  with the same title, artist and title alone may not be enough to identify it,
+  and community catalogues are thinner for this material to begin with. Game
+  and fandom music is affected more than most.
+- **It applies to everything, not just lyrics.** Artwork and artist metadata
+  are planned, and they will hit the same wall — arguably harder, since
+  matching a *release* is a fuzzier problem than matching a song.
+
+**What helps**
+
+- Fix the tags. **Settings → Library → Allow tag editing**, then edit the track;
+  every change is journalled and reversible. Correct tags fix the lookups
+  permanently, and they improve the library, search and grouping too.
+- Turn on **Try other releases** (see above), which retries on artist and title
+  alone when the exact lookup misses.
+- Check the [activity log](#checking-what-it-actually-did). A `not-found` line
+  shows the exact artist and title that were sent, which is usually enough to
+  see what is wrong with the tags.
 
 Nothing else in Resonance touches the network. Your library, artwork,
 suggestions and statistics are all built on your own machine, and always were.
@@ -379,7 +443,7 @@ scripted fake. **No test in the workspace opens a socket.**
 ## Tests
 
 ```bash
-cargo test --workspace          # 820 tests
+cargo test --workspace          # 832 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```

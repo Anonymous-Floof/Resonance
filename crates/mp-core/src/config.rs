@@ -486,6 +486,24 @@ pub struct Privacy {
     /// track is never asked about twice. Every request is written to the
     /// activity log, which is a plain text file the user can read.
     pub online_lyrics: bool,
+
+    /// When the exact recording is not found, accept another release of the
+    /// same song.
+    ///
+    /// Off by default, and does nothing unless [`Self::online_lyrics`] is on.
+    ///
+    /// The strict lookup matches artist, title, album and duration together,
+    /// so it either finds the recording being played or finds nothing. A
+    /// library ripped from YouTube misses on all four at once — the artist is
+    /// a channel, the album is absent, the duration is a second out — and this
+    /// retries on artist and title alone.
+    ///
+    /// Still exact on the two fields that identify the song, so it cannot
+    /// return a *different* song, only a different pressing of the same one.
+    /// The cost is that any timings belong to that other pressing and may
+    /// drift against what is actually playing, which is why it is a choice
+    /// rather than the default.
+    pub online_lyrics_any_release: bool,
 }
 
 impl Default for Privacy {
@@ -495,6 +513,8 @@ impl Default for Privacy {
             bundle_statistics: false,
             // Off. The user opts in to this build's networking, always.
             online_lyrics: false,
+            // Off again: it trades exactness for hits, and that is a choice.
+            online_lyrics_any_release: false,
         }
     }
 }

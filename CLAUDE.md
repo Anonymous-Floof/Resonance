@@ -71,10 +71,25 @@ setting (off by default), the UI that explains what it sends, and every doc
 claim that changes. The `Source` carries the "what is sent" sentence so the
 settings screen and the code cannot drift apart — print it, do not retype it.
 
+**Lookups are made from tags, and a lot of tags are wrong.** Nothing is sent
+but text the file already carries, so a track ripped from YouTube — channel
+name as the artist, `(Official Video)` in the title, no album, a duration a
+second or two out — misses on every field at once. This is the single largest
+source of "the feature does not work" and it is not a bug to be fixed in the
+fetcher; it is the reason `Match::AnyRelease` exists, and the reason the
+activity log records the exact artist and title that were sent.
+
+Artwork and artist metadata will hit this harder, not softer: matching a
+*release* is fuzzier than matching a song, and a wrong cover is more visible
+than a missing one. Whatever is built there needs the same shape — a strict
+lookup that can only be right or absent, and any loosening behind its own
+setting. See *Known limitation* in the README, which is the user-facing half of
+this.
+
 ## Checks before any commit
 
 ```bash
-cargo test --workspace          # 820 tests
+cargo test --workspace          # 832 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all
 ```

@@ -1216,7 +1216,28 @@ fn online_section(
         .apply(out);
 
         if config.privacy.online_lyrics {
+            row(
+                ui,
+                theme,
+                "Try other releases",
+                "If the exact recording is not found, accept another release of the same song",
+                |ui| {
+                    ui.checkbox(&mut config.privacy.online_lyrics_any_release, "")
+                        .changed()
+                },
+            )
+            .apply(out);
+
             ui.add_space(m.space(1.0));
+
+            if config.privacy.online_lyrics_any_release {
+                note(
+                    ui,
+                    theme,
+                    "Many more matches on files saved from YouTube, whose album and length rarely match any release. The words are still matched on artist and title, so they belong to the right song — but any timings come from a different pressing and may drift.",
+                );
+                ui.add_space(m.space(1.0));
+            }
 
             let source = network.source;
             note(ui, theme, &format!("Lyrics come from {}.", source.label));
