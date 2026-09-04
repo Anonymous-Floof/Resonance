@@ -6,7 +6,7 @@ members = ["crates/mp-core", "crates/mp-audio", "crates/mp-net", "crates/mp-ui"]
 # `main` cannot, and a user should be able to tell which one they are running
 # without going looking — so it is in the window title, the log, the exported
 # bundle and the User-Agent this sends to the services it calls.
-version = "0.2.0-networked"
+version = "0.3.0-networked"
 edition = "2024"
 # 1.88 rather than the 1.85 that edition 2024 alone needs: the codebase uses
 # let-chains (`if let Some(x) = ... && ...`), which stabilised in 1.88.
@@ -17,7 +17,9 @@ license = "MIT"
 # --- internal ---
 mp-core = { path = "crates/mp-core" }
 mp-audio = { path = "crates/mp-audio" }
-# Networking, on this branch only. Nothing depends on it yet — see its lib.rs.
+# Networking, on this branch only, and the one crate allowed an HTTP client.
+# `cargo tree --workspace -i ureq` should always name exactly this and nothing
+# else — see its lib.rs.
 mp-net = { path = "crates/mp-net" }
 mp-ui = { path = "crates/mp-ui" }
 
