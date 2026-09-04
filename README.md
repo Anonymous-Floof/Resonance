@@ -118,9 +118,20 @@ with the operating system.
 
 ## Install
 
-Download `resonance.exe` from the [releases page][releases] and run it. There is
-no installer and nothing is written outside the directories listed
-[below](#where-your-files-live).
+Download **`resonance-networked.exe`** from the [releases page][releases] and
+run it. There is no installer and nothing is written outside the directories
+listed [below](#where-your-files-live).
+
+> [!WARNING]
+> **Check which file you are downloading.** The releases page carries both
+> builds, and they make different promises:
+>
+> - `resonance.exe` — the offline build. No HTTP client in the binary at all.
+> - `resonance-networked.exe` — this one. Can fetch lyrics, once you switch it
+>   on.
+>
+> The window title says which one is running, so you can always check after the
+> fact as well.
 
 [releases]: ../../releases
 
