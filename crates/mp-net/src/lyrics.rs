@@ -527,6 +527,10 @@ mod tests {
             }
             answers.remove(0)
         }
+
+        fn get_bytes(&self, url: &str) -> Result<crate::http::FetchedBytes, NetError> {
+            unreachable!("lyrics are text; nothing here should fetch bytes: {url}");
+        }
     }
 
     /// A transport that must never be reached.
@@ -534,6 +538,10 @@ mod tests {
 
     impl Transport for Forbidden {
         fn get(&self, url: &str) -> Result<Body, NetError> {
+            panic!("a request was made when none should have been: {url}");
+        }
+
+        fn get_bytes(&self, url: &str) -> Result<crate::http::FetchedBytes, NetError> {
             panic!("a request was made when none should have been: {url}");
         }
     }
@@ -560,6 +568,10 @@ mod tests {
     impl Transport for ScriptedRef {
         fn get(&self, url: &str) -> Result<Body, NetError> {
             self.0.get(url)
+        }
+
+        fn get_bytes(&self, url: &str) -> Result<crate::http::FetchedBytes, NetError> {
+            self.0.get_bytes(url)
         }
     }
 

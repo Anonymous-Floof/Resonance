@@ -15,6 +15,7 @@ pub mod accent;
 pub mod art;
 pub mod db;
 pub mod duplicates;
+pub mod enrich;
 pub mod features;
 pub mod ingest;
 pub mod lyrics;

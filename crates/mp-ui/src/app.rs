@@ -19,6 +19,7 @@ use mp_net::Activity;
 use crate::adaptive::Adaptive;
 use crate::analysis_job::AnalysisJob;
 use crate::artwork::Artwork;
+use crate::artwork_job::ArtworkJob;
 use crate::fonts::{self, FontReport};
 use crate::immersive::Immersive;
 use crate::library::{Emptiness, Focus, LibraryState};
@@ -86,6 +87,10 @@ pub struct ResonanceApp {
     /// there is no worker thread and no possibility of a request while the
     /// feature is off.
     lyrics_job: Option<LyricsJob>,
+    /// Started and stopped by [`Self::tend_artwork`] the same way, and for the
+    /// same reason: "off" should mean no thread exists that could make a
+    /// request, not a flag consulted somewhere inside one.
+    artwork_job: Option<ArtworkJob>,
 
     /// Whether the first-run welcome is still showing.
     ///
@@ -236,6 +241,7 @@ impl ResonanceApp {
             immersive: Immersive::new(),
             activity,
             lyrics_job: None,
+            artwork_job: None,
             welcome: first_run,
             focus_search: false,
             media,
@@ -1989,6 +1995,37 @@ impl ResonanceApp {
     /// Only the cache on disk. Lyrics already on screen stay until the track
     /// changes, and the session memo in the fetcher is dropped with it so the
     /// next lookup genuinely asks again.
+    /// Forget which albums have been searched, so they are looked up again.
+    ///
+    /// Deliberately does not remove covers already found. Those are attached
+    /// to albums and visible on screen, and a button labelled "clear cache"
+    /// should not take pictures away from the library.
+    fn clear_artwork_cache(&mut self) {
+        // Stop first: the pass holds the same cache and would write its
+        // current answer back in behind the deletion.
+        self.artwork_job = None;
+
+        let cache = mp_net::cache::Cache::new(
+            self.paths
+                .cache_dir()
+                .join(mp_net::artwork::CACHE_NAMESPACE),
+        );
+
+        match cache.clear() {
+            Ok(()) => {
+                self.player
+                    .notice("Artwork lookups cleared.".to_owned(), false);
+            }
+            Err(err) => {
+                tracing::warn!("could not clear the artwork cache: {err:#}");
+                self.player.notice(
+                    "Could not clear the cached artwork lookups.".to_owned(),
+                    true,
+                );
+            }
+        }
+    }
+
     fn clear_lyrics_cache(&mut self) {
         let cache =
             mp_net::Cache::new(self.paths.cache_dir().join(mp_net::lyrics::CACHE_NAMESPACE));
@@ -2016,6 +2053,49 @@ impl ResonanceApp {
     /// the handle, which closes the channel and ends the thread — so "off"
     /// means there is no code running that could make a request, rather than
     /// a flag being checked somewhere.
+    /// Start or stop the artwork pass as the setting changes.
+    ///
+    /// Unlike the lyrics worker this one finishes on its own: once every album
+    /// has been looked up there is nothing left to ask, so the thread ends and
+    /// the handle is dropped. Leaving the setting on therefore costs nothing
+    /// until new albums arrive, at which point the next launch picks them up.
+    fn tend_artwork(&mut self, ctx: &egui::Context) {
+        let wanted = self.config.privacy.online_artwork;
+        let running = self
+            .artwork_job
+            .as_ref()
+            .is_some_and(ArtworkJob::is_running);
+
+        match (wanted, self.artwork_job.is_some()) {
+            (true, false) => {
+                self.artwork_job = ArtworkJob::start(
+                    self.library.library(),
+                    Arc::clone(&self.activity),
+                    self.paths.cache_dir().to_path_buf(),
+                    ctx.clone(),
+                );
+            }
+            // Dropping the handle cancels the thread; see `ArtworkJob::drop`.
+            (false, true) => self.artwork_job = None,
+            _ => {}
+        }
+
+        if let Some(job) = &self.artwork_job {
+            if let Some(error) = job.take_error() {
+                tracing::warn!("the artwork pass stopped: {error}");
+                self.player
+                    .notice("The artwork search stopped early.".to_owned(), true);
+            }
+
+            // Covers landed on the index, not in memory, so the browse views
+            // are still holding the rows they read before. Without this the
+            // pictures only appear after something else forces a reload.
+            if running && !job.is_running() {
+                self.library.invalidate();
+            }
+        }
+    }
+
     fn tend_lyrics(&mut self, ctx: &egui::Context) {
         match (self.config.privacy.online_lyrics, self.lyrics_job.is_some()) {
             (true, false) => {
@@ -2796,6 +2876,11 @@ impl ResonanceApp {
                 fades: self.player.fades(),
                 network: views::settings::Network {
                     source: &mp_net::source::LRCLIB,
+                    artwork_sources: [
+                        &mp_net::source::MUSICBRAINZ,
+                        &mp_net::source::COVER_ART_ARCHIVE,
+                    ],
+                    artwork: self.artwork_job.as_ref().map(ArtworkJob::status),
                     entries: self.activity.len(),
                     requests: self.activity.requests_made(),
                     log_path: log_path.as_deref(),
@@ -2805,6 +2890,10 @@ impl ResonanceApp {
 
         if outcome.show_activity_log {
             self.show_activity_log();
+        }
+
+        if outcome.clear_artwork_cache {
+            self.clear_artwork_cache();
         }
 
         if outcome.clear_lyrics_cache {
@@ -3102,6 +3191,7 @@ impl eframe::App for ResonanceApp {
         self.top_up_radio();
         self.tend_analysis();
         self.tend_lyrics(ui.ctx());
+        self.tend_artwork(ui.ctx());
 
         // Lyrics are read from disk, so this only does anything while the
         // full-screen view is open and the track has changed under it. The

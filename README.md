@@ -4,9 +4,9 @@
 > to opt out of. This build can reach the network, and everything it can reach
 > is listed below and switched off until you turn it on.
 >
-> Right now that is one thing: fetching lyrics for tracks that have none. See
-> [Online lookups](#online-lookups), and [BRANCH.md](BRANCH.md) for why the two
-> builds exist.
+> Right now that is two things: fetching lyrics for tracks that have none, and
+> cover art for albums that have none. See [Online lookups](#online-lookups),
+> and [BRANCH.md](BRANCH.md) for why the two builds exist.
 
 > [!NOTE]
 > - This project was built with 99% AI assistance (Claude Opus 5+) under human oversight. 🤖
@@ -55,7 +55,8 @@ with the operating system.
 - Instant full-text search across title, artist, album and genre
 - Cleans up messy metadata — `- Topic` channel names, download-site
   watermarks, titles that repeat their own artist — without inventing anything
-- Cover art extracted from tags or picked up from `folder.jpg` beside the music
+- Cover art extracted from tags or picked up from `folder.jpg` beside the
+  music, and optionally [fetched](#online-lookups) for albums that have neither
 - Finds duplicates by title and artist within a duration tolerance
 
 **Playback**
@@ -105,10 +106,12 @@ with the operating system.
 **Privacy and safety**
 - **Never modifies your audio files.** Tag editing is off by default, and every
   edit it does make is reversible from a history panel.
-- **Nothing leaves your machine unless you switch it on.** Your library,
-  artwork and suggestions are all built locally and always have been. The one
-  feature that reaches out is [lyrics fetching](#online-lookups), it is off by
-  default, and Settings says exactly what it would send.
+- **Nothing leaves your machine unless you switch it on.** Your library and
+  suggestions are built locally and always have been. Two features reach out —
+  [lyrics and cover art](#online-lookups) — both are off by default, and
+  Settings names every service and says exactly what it would send.
+- **Never writes to your music files.** A fetched cover goes into the app's own
+  cache, not into your tags and not into your folders.
 - **Every request is written down** in a plain text file you can read, whether
   or not it came back with anything.
 
@@ -308,6 +311,43 @@ they are synced they may drift against what you are actually hearing. Plain
 lyrics are unaffected. It also costs one extra request, and only on tracks that
 have already missed.
 
+### Fetching cover art
+
+**Settings → Online → Fetch cover art.** Off by default.
+
+Albums with no cover in their tags, no `folder.jpg` beside them, and no art on
+any of their tracks can have one looked up. Nothing else is touched — an album
+that already shows a picture is never queried.
+
+This takes two services, because the picture and the *identity* of a release
+live in different places:
+
+| | |
+|---|---|
+| **Where it goes** | `musicbrainz.org` to work out which release the album is, then `coverartarchive.org` for the picture |
+| **Also contacted** | `archive.org` — the Cover Art Archive redirects there, and the image file itself arrives from the Internet Archive. Settings says so before you switch it on, and the activity log records which host actually answered |
+| **What is sent** | The album title and artist from your tags, then a release identifier that came back from the first request. Nothing about you, your library or your file paths |
+| **When** | Once per album, in the background, at roughly one album a second |
+| **If it fails** | Nothing happens. The album has no cover, exactly as before |
+
+**It will not guess.** A search result is accepted only when its release title
+*and* artist match the album exactly. MusicBrainz's own confidence score is
+ignored — a high score on a different album is still a different album. So it
+either finds the right cover or leaves the album alone.
+
+That strictness matters more here than for lyrics. A wrong cover is visible
+every time you play the album, and it feeds the adaptive accent colour, so it
+would quietly recolour the whole interface.
+
+**Your files are not written to.** A fetched cover goes into Resonance's own
+cache, exactly where covers pulled out of tags already go, and the album is
+pointed at it. No tag is added and no file is created in your music folders.
+
+Because the pass identifies a *release*, it needs a real album title — so it
+does much less for loose singles and YouTube rips, which usually have no album
+at all. **Settings → Online → Clear cached artwork** forgets which albums have
+been searched so they are tried again; covers already found stay put.
+
 ### Checking what it actually did
 
 Every lookup is written to a plain text file, one line each, including the ones
@@ -317,7 +357,13 @@ that never left your machine:
 2026-09-04T14:03:11Z	lrclib	lrclib.net	ok	5902	lyrics for "Creep" by Radiohead
 2026-09-04T14:05:02Z	lrclib	lrclib.net	not-found	0	lyrics for "untitled 3" by ---
 2026-09-04T14:07:44Z	lrclib	lrclib.net	cached	0	lyrics for "Amnesiac" by Radiohead
+2026-09-04T14:09:03Z	musicbrainz	musicbrainz.org	ok	1841	cover for "Kid A" by Radiohead
+2026-09-04T14:09:05Z	coverartarchive	ia800207.us.archive.org	ok	48210	cover for "Kid A" by Radiohead
 ```
+
+Note the third column on the last line. The request was addressed to
+`coverartarchive.org`, and the Internet Archive is what actually answered it —
+so that is what the log says.
 
 `cached` and `skipped` mean no request was made. **Settings → Online → Show the
 activity log** opens it; it lives beside the library index in
@@ -365,9 +411,10 @@ Two further things make this worse for some collections than others:
   with the same title, artist and title alone may not be enough to identify it,
   and community catalogues are thinner for this material to begin with. Game
   and fandom music is affected more than most.
-- **It applies to everything, not just lyrics.** Artwork and artist metadata
-  are planned, and they will hit the same wall — arguably harder, since
-  matching a *release* is a fuzzier problem than matching a song.
+- **It applies to cover art too, and harder.** Artwork is matched against a
+  *release* rather than a song, so it needs a real album title — and loose
+  singles and YouTube rips usually have none at all. Where lyrics can fall back
+  to artist and title, an album with no album name has nothing to search with.
 
 **What helps**
 
@@ -465,7 +512,7 @@ scripted fake. **No test in the workspace opens a socket.**
 ## Tests
 
 ```bash
-cargo test --workspace          # 843 tests
+cargo test --workspace          # 880 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```
@@ -477,7 +524,7 @@ changed. Before trusting a clean result, `cargo clean` first.
 
 ## Diagnostic examples
 
-Nine examples exist for things unit tests cannot reach. All are headless
+Ten examples exist for things unit tests cannot reach. All are headless
 unless noted.
 
 **Something will not play, or plays wrong**
@@ -526,7 +573,24 @@ cargo run -p mp-net --example lyrics_probe -- "Radiohead" "Creep" "Pablo Honey" 
 Makes one real request to LRCLIB and prints the URL, what came back and the log
 line it produced. The unit tests answer from a scripted fake, which proves the
 logic and proves nothing about whether the field names are still right. **This
-one uses the network** — it is the only example that does.
+one uses the network.**
+
+Pass `--any-release` to allow the relaxed retry, which is the quickest way to
+tell a track that is genuinely missing from one that is merely tagged with an
+album and length nothing recognises.
+
+**Cover art is not being found**
+
+```bash
+cargo run -p mp-net --example artwork_probe -- "Radiohead" "Kid A"
+```
+Runs the whole two-step lookup — MusicBrainz for the release, then the Cover
+Art Archive for the picture — and prints the release id, the image size and
+format, and which host actually served it. **This one uses the network.**
+
+Useful for seeing the strict matching work: give it a real artist and an album
+they never made and it reports how many releases came back and that none of
+them were the right one.
 
 **Checking for regressions**
 

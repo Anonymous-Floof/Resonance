@@ -79,9 +79,13 @@ source of "the feature does not work" and it is not a bug to be fixed in the
 fetcher; it is the reason `Match::AnyRelease` exists, and the reason the
 activity log records the exact artist and title that were sent.
 
-Artwork and artist metadata will hit this harder, not softer: matching a
-*release* is fuzzier than matching a song, and a wrong cover is more visible
-than a missing one. Whatever is built there needs the same shape — a strict
+Artwork hits this harder, and is built accordingly. MusicBrainz has no
+exact-match endpoint, so the search returns scored guesses and the strictness
+lives on our side: `artwork::matches` accepts a candidate only when its release
+title *and* artist equal the album's, and the score is ignored outright. That
+is what buys back the "right or absent" property LRCLIB gives for free.
+
+Anything added later — artist metadata, genres — needs the same shape. A
 lookup that can only be right or absent, and any loosening behind its own
 setting. See *Known limitation* in the README, which is the user-facing half of
 this.
@@ -89,7 +93,7 @@ this.
 ## Checks before any commit
 
 ```bash
-cargo test --workspace          # 843 tests
+cargo test --workspace          # 880 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all
 ```

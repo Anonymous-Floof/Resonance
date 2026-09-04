@@ -4,6 +4,7 @@ pub mod adaptive;
 pub mod analysis_job;
 pub mod app;
 pub mod artwork;
+pub mod artwork_job;
 pub mod fonts;
 pub mod immersive;
 pub mod library;

@@ -38,11 +38,21 @@ pub struct Source {
     /// What to call it on screen.
     pub label: &'static str,
 
-    /// The single host contacted, without a scheme or a path.
+    /// The host the request is addressed to, without a scheme or a path.
     ///
     /// One host per source, so that "what did it talk to" has a short and
-    /// complete answer. A service needing two hosts is two sources.
+    /// complete answer. A service needing two unrelated hosts is two sources.
     pub host: &'static str,
+
+    /// A second host the request is redirected to, when there is one.
+    ///
+    /// Cover Art Archive answers with a redirect and the image itself arrives
+    /// from the Internet Archive, so a request addressed to one host is served
+    /// by another. Naming only the first would let the opt-in screen and the
+    /// activity log say this build talks to one host when it talks to two,
+    /// which is exactly the kind of quiet inaccuracy this branch exists to
+    /// avoid. `None` where the request goes nowhere else.
+    pub redirected_to: Option<&'static str>,
 
     /// What the user gets out of it, in a sentence.
     pub purpose: &'static str,
@@ -76,6 +86,7 @@ pub const LRCLIB: Source = Source {
     id: "lrclib",
     label: "LRCLIB",
     host: "lrclib.net",
+    redirected_to: None,
     purpose: "Lyrics, timed to the music where someone has contributed them.",
     sends: "The artist, title and album from the track's own tags, and its length in seconds.",
     terms: "https://lrclib.net/docs",
@@ -84,8 +95,48 @@ pub const LRCLIB: Source = Source {
     min_interval: Duration::from_millis(500),
 };
 
+/// The release database artwork is found through.
+///
+/// Cover art is filed against a *release*, not a song, so there is nothing to
+/// ask the image archive for until a release has been identified. That is what
+/// this is for, and it is the only reason it is contacted.
+///
+/// MusicBrainz has no exact-match endpoint of the kind LRCLIB offers — the
+/// search returns scored guesses. The strictness therefore lives on our side:
+/// a candidate is accepted only when its artist and title equal what was asked
+/// for, so the search finds candidates and the comparison decides. See
+/// [`crate::artwork`].
+pub const MUSICBRAINZ: Source = Source {
+    id: "musicbrainz",
+    label: "MusicBrainz",
+    host: "musicbrainz.org",
+    redirected_to: None,
+    purpose: "Identifies which release an album is, so its cover can be found.",
+    sends: "The album title and artist name from the track's own tags.",
+    terms: "https://musicbrainz.org/doc/About",
+    // One request per second, stated in their documentation and enforced.
+    // Going faster earns a block, and the block is of the application.
+    min_interval: Duration::from_millis(1_100),
+};
+
+/// The cover images themselves.
+///
+/// Addressed at `coverartarchive.org`, which answers with a redirect to the
+/// Internet Archive, where the file actually lives. Both are named because
+/// both are contacted.
+pub const COVER_ART_ARCHIVE: Source = Source {
+    id: "coverartarchive",
+    label: "Cover Art Archive",
+    host: "coverartarchive.org",
+    redirected_to: Some("archive.org"),
+    purpose: "The cover image for a release that has one.",
+    sends: "A MusicBrainz release identifier. Nothing from your files.",
+    terms: "https://coverartarchive.org",
+    min_interval: Duration::from_millis(500),
+};
+
 /// Every source this build can reach.
-pub const SOURCES: &[Source] = &[LRCLIB];
+pub const SOURCES: &[Source] = &[LRCLIB, MUSICBRAINZ, COVER_ART_ARCHIVE];
 
 /// Look up a source by its [`id`](Source::id).
 ///
@@ -105,6 +156,7 @@ mod tests {
         id: "example",
         label: "Example",
         host: "example.org",
+        redirected_to: None,
         purpose: "Nothing at all; this source is a test fixture.",
         sends: "Nothing, because no request is ever made to it.",
         terms: "https://example.org/terms",
@@ -140,10 +192,30 @@ mod tests {
     #[test]
     fn a_host_is_a_bare_host() {
         for source in SOURCES.iter().chain(std::iter::once(&EXAMPLE)) {
-            let host = source.host;
-            assert!(!host.contains("://"), "{host} carries a scheme");
-            assert!(!host.contains('/'), "{host} carries a path");
-            assert!(!host.contains(' '), "{host} is not a single host");
+            for host in [Some(source.host), source.redirected_to]
+                .into_iter()
+                .flatten()
+            {
+                assert!(!host.contains("://"), "{host} carries a scheme");
+                assert!(!host.contains('/'), "{host} carries a path");
+                assert!(!host.contains(' '), "{host} is not a single host");
+                assert!(!host.is_empty(), "{} has an empty host", source.id);
+            }
+        }
+    }
+
+    /// A redirect that lands back on the host it started from is not a second
+    /// host and should not be declared as one.
+    #[test]
+    fn a_redirect_target_is_a_different_host() {
+        for source in SOURCES {
+            if let Some(elsewhere) = source.redirected_to {
+                assert_ne!(
+                    elsewhere, source.host,
+                    "{} declares a redirect to itself",
+                    source.id
+                );
+            }
         }
     }
 

@@ -53,6 +53,7 @@
 //! against a scripted fake. Nothing in `cargo test` opens a socket.
 
 pub mod activity;
+pub mod artwork;
 pub mod cache;
 pub mod error;
 pub mod http;

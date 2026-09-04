@@ -21,6 +21,10 @@
 
 use std::time::Duration;
 
+// Carries `get_uri`, which reports where a response actually came from once
+// redirects have been followed. See `FetchedBytes::served_by`.
+use ureq::ResponseExt;
+
 use crate::error::NetError;
 
 /// How long a single request may take, start to finish.
@@ -34,6 +38,28 @@ pub const TIMEOUT: Duration = Duration::from_secs(10);
 /// Lyrics are a few kilobytes. This is not a tuning knob, it is a refusal to
 /// let a misbehaving or hostile endpoint stream until memory runs out.
 pub const MAX_BODY_BYTES: u64 = 1024 * 1024;
+
+/// The largest image that will be read.
+///
+/// A 500px cover is 30-100 KB. Four megabytes is far more than one should
+/// ever be, and still a refusal rather than a tuning knob.
+pub const MAX_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// A binary response body, and where it actually came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedBytes {
+    pub body: Vec<u8>,
+    /// Bytes received, for the activity log.
+    pub bytes: u64,
+    /// The host that served this, after any redirects were followed.
+    ///
+    /// The reason this is carried at all: a request addressed to
+    /// `coverartarchive.org` is answered by the Internet Archive, so the host
+    /// asked and the host that replied are different machines. Recording the
+    /// one that replied is what keeps the activity log a record of what
+    /// happened rather than of what was intended.
+    pub served_by: Option<String>,
+}
 
 /// A response body, and what it cost.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +75,13 @@ pub struct Fetched {
 pub trait Transport: Send + Sync {
     /// Perform a GET, following the service's rules for what counts as a miss.
     fn get(&self, url: &str) -> Result<Fetched, NetError>;
+
+    /// The same, for a response that is not text.
+    ///
+    /// Required rather than defaulted: a transport that silently could not
+    /// fetch an image would look exactly like a service with no cover for a
+    /// release, and the difference matters.
+    fn get_bytes(&self, url: &str) -> Result<FetchedBytes, NetError>;
 }
 
 /// The real thing.
@@ -100,7 +133,54 @@ pub fn user_agent() -> String {
 
 impl Transport for Http {
     fn get(&self, url: &str) -> Result<Fetched, NetError> {
-        let mut response = self
+        let mut response = self.send(url)?;
+
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_BODY_BYTES)
+            .read_to_string()
+            .map_err(|err| NetError::Decode(err.to_string()))?;
+
+        Ok(Fetched {
+            bytes: body.len() as u64,
+            body,
+        })
+    }
+
+    fn get_bytes(&self, url: &str) -> Result<FetchedBytes, NetError> {
+        let mut response = self.send(url)?;
+
+        // Read after any redirect has been followed, so this names the machine
+        // that actually answered rather than the one that was asked.
+        let served_by = response
+            .get_uri()
+            .host()
+            .map(|host| host.trim_start_matches("www.").to_owned());
+
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_IMAGE_BYTES)
+            .read_to_vec()
+            .map_err(|err| NetError::Decode(err.to_string()))?;
+
+        Ok(FetchedBytes {
+            bytes: body.len() as u64,
+            body,
+            served_by,
+        })
+    }
+}
+
+impl Http {
+    /// Send the request and turn the status line into a [`NetError`].
+    ///
+    /// Shared so that text and binary fetches cannot disagree about what a
+    /// 404 or a 429 means — the rate limiter backs off on one and not the
+    /// other, so the distinction is load-bearing.
+    fn send(&self, url: &str) -> Result<ureq::http::Response<ureq::Body>, NetError> {
+        let response = self
             .agent
             .get(url)
             .call()
@@ -127,17 +207,7 @@ impl Transport for Http {
             return Err(NetError::Status { status });
         }
 
-        let body = response
-            .body_mut()
-            .with_config()
-            .limit(MAX_BODY_BYTES)
-            .read_to_string()
-            .map_err(|err| NetError::Decode(err.to_string()))?;
-
-        Ok(Fetched {
-            bytes: body.len() as u64,
-            body,
-        })
+        Ok(response)
     }
 }
 

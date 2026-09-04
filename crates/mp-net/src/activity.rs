@@ -183,6 +183,22 @@ impl Entry {
         self
     }
 
+    /// Name the host that actually answered, where it is not the one asked.
+    ///
+    /// A request to `coverartarchive.org` is answered by the Internet Archive.
+    /// Logging the address rather than the responder would leave the file
+    /// saying this build talked to a host it never reached, and omitting one
+    /// it did — which is the sort of small untruth that makes the whole record
+    /// worthless. The declared [`Source::redirected_to`] says this is expected;
+    /// this says where it actually went.
+    pub fn with_host(mut self, host: impl Into<String>) -> Self {
+        let host = sanitise(host.into());
+        if !host.trim().is_empty() {
+            self.host = host;
+        }
+        self
+    }
+
     /// Override the timestamp. Tests, and replaying an entry read from disk.
     pub fn at_time(mut self, unix_seconds: i64) -> Self {
         self.at = unix_seconds;
@@ -565,6 +581,7 @@ mod tests {
         id: "example",
         label: "Example",
         host: "example.org",
+        redirected_to: None,
         purpose: "A test fixture.",
         sends: "Nothing.",
         terms: "https://example.org/terms",

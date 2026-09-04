@@ -55,6 +55,12 @@ pub struct Network<'a> {
     /// The service lyrics come from, so the description on screen and the code
     /// that makes the request cannot disagree.
     pub source: &'static mp_net::Source,
+    /// The services artwork comes from, described the same way. Two, because
+    /// identifying a release and serving its picture are different jobs done
+    /// by different people.
+    pub artwork_sources: [&'static mp_net::Source; 2],
+    /// How the artwork pass is getting on, when it is running.
+    pub artwork: Option<crate::artwork_job::Status>,
     /// Entries in the log, including the ones that never left the machine.
     pub entries: usize,
     /// How many of those were actual requests.
@@ -117,6 +123,12 @@ pub struct SettingsOutcome {
     pub show_activity_log: bool,
     /// Forget every lyric fetched so far.
     pub clear_lyrics_cache: bool,
+    /// Forget which albums have been searched for a cover.
+    ///
+    /// Only the record of having looked. Covers already found stay in the art
+    /// cache and stay attached, because throwing away a picture the user can
+    /// see is a bigger action than the button appears to offer.
+    pub clear_artwork_cache: bool,
 
     /// The output device or buffer size changed; the stream has to be
     /// reopened for it to take effect.
@@ -1251,6 +1263,64 @@ fn online_section(
 
         ui.add_space(m.space(1.5));
 
+        row(
+            ui,
+            theme,
+            "Fetch cover art",
+            "For albums with no cover in their tags and no folder.jpg beside them",
+            |ui| {
+                ui.checkbox(&mut config.privacy.online_artwork, "")
+                    .changed()
+            },
+        )
+        .apply(out);
+
+        if config.privacy.online_artwork {
+            ui.add_space(m.space(1.0));
+
+            for source in network.artwork_sources {
+                // Printed from the source itself for the same reason as the
+                // lyrics line: the sentence on screen and the code that makes
+                // the request cannot be allowed to drift apart.
+                note(
+                    ui,
+                    theme,
+                    &format!(
+                        "{} — {} Sends: {}",
+                        source.label, source.purpose, source.sends
+                    ),
+                );
+
+                // A request answered by a machine the user was never told
+                // about is precisely what the activity log exists to prevent,
+                // so the redirect is stated before it happens rather than
+                // discovered afterwards in the log.
+                if let Some(elsewhere) = source.redirected_to {
+                    note(
+                        ui,
+                        theme,
+                        &format!(
+                            "The image itself is served by {elsewhere}, which {} redirects to.",
+                            source.host
+                        ),
+                    );
+                }
+            }
+
+            note(
+                ui,
+                theme,
+                "A cover is accepted only when the release title and artist match the album exactly, so it either finds the right one or leaves the album as it was. Covers are stored in this app's cache; your music files are never written to.",
+            );
+
+            if let Some(status) = network.artwork {
+                ui.add_space(m.space(1.0));
+                note(ui, theme, &status.summary());
+            }
+        }
+
+        ui.add_space(m.space(1.5));
+
         // The log is the feature that makes any of the above checkable rather
         // than merely stated, so it is shown whether or not fetching is on —
         // including the case where the honest number is zero.
@@ -1273,6 +1343,18 @@ fn online_section(
                 .clicked()
             {
                 out.clear_lyrics_cache = true;
+            }
+
+            ui.add_space(m.space(0.75));
+
+            if ui
+                .button("Clear cached artwork")
+                .on_hover_text(
+                    "Forget which albums were searched for, so they are looked up again. Covers already found stay where they are.",
+                )
+                .clicked()
+            {
+                out.clear_artwork_cache = true;
             }
         });
     });
@@ -1545,6 +1627,11 @@ mod tests {
     fn network(entries: usize, requests: usize) -> Network<'static> {
         Network {
             source: &mp_net::source::LRCLIB,
+            artwork_sources: [
+                &mp_net::source::MUSICBRAINZ,
+                &mp_net::source::COVER_ART_ARCHIVE,
+            ],
+            artwork: None,
             entries,
             requests,
             log_path: None,

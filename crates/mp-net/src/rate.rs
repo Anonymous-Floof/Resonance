@@ -298,6 +298,7 @@ mod tests {
             id: "example",
             label: "Example",
             host: "example.org",
+            redirected_to: None,
             purpose: "A test fixture.",
             sends: "Nothing.",
             terms: "https://example.org/terms",

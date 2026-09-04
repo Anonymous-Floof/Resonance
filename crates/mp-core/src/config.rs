@@ -504,6 +504,25 @@ pub struct Privacy {
     /// drift against what is actually playing, which is why it is a choice
     /// rather than the default.
     pub online_lyrics_any_release: bool,
+
+    /// Look up cover art for albums that have none.
+    ///
+    /// Off by default, like everything else that reaches out.
+    ///
+    /// Two services, because the picture and the identity of a release live in
+    /// different places: MusicBrainz says which release an album is, and the
+    /// Cover Art Archive serves the image for it. Only albums with no cover
+    /// anywhere — not in a tag, not in a `folder.jpg`, not on any of their
+    /// tracks — are ever looked up, and each is asked about once.
+    ///
+    /// A candidate release is accepted only when its title and artist equal
+    /// the album's own, so a lookup either finds the right cover or finds
+    /// nothing. That matters more here than for lyrics: a wrong cover is
+    /// visible on every play, and it feeds the adaptive accent colour.
+    ///
+    /// The image is stored in the app's own cache. **No audio file is written
+    /// to, and no tag is added.**
+    pub online_artwork: bool,
 }
 
 impl Default for Privacy {
@@ -515,6 +534,8 @@ impl Default for Privacy {
             online_lyrics: false,
             // Off again: it trades exactness for hits, and that is a choice.
             online_lyrics_any_release: false,
+            // And again. This one reaches two services rather than one.
+            online_artwork: false,
         }
     }
 }
