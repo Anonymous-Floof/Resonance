@@ -31,6 +31,10 @@
 //! - [`cache`] — answers kept on disk, misses included.
 //! - [`lyrics`] — the first fetcher: LRCLIB, for words the audio file does not
 //!   carry.
+//! - [`artwork`] — covers, by way of MusicBrainz and the Cover Art Archive.
+//! - [`tool`] — the one thing here that is not a request: running an external
+//!   program, for the work no GET can do. What it costs, and why it is
+//!   declared rather than hidden, is written up there.
 //!
 //! The first three were built before any of the others, deliberately. A log
 //! added after the fetchers is a log with gaps in it, and a rate limiter added
@@ -50,7 +54,9 @@
 //! The whole workspace suite runs offline. Fetchers talk to
 //! [`Transport`](http::Transport) rather than to [`Http`](http::Http), so
 //! misses, rate limits, dead servers and garbage responses are all tested
-//! against a scripted fake. Nothing in `cargo test` opens a socket.
+//! against a scripted fake, and [`Runner`](tool::Runner) is the same seam for
+//! the one thing here that is not a request. Nothing in `cargo test` opens a
+//! socket, and nothing spawns a process.
 
 pub mod activity;
 pub mod artwork;
@@ -61,6 +67,7 @@ pub mod lyrics;
 pub mod rate;
 pub mod source;
 pub mod timestamp;
+pub mod tool;
 
 pub use activity::{Activity, Entry, LOG_FILE_NAME, Outcome};
 pub use cache::Cache;
@@ -68,3 +75,4 @@ pub use error::NetError;
 pub use http::{Http, Transport};
 pub use rate::Limiter;
 pub use source::{SOURCES, Source};
+pub use tool::{Runner, YtDlp};
