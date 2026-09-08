@@ -20,6 +20,7 @@ pub mod views;
 pub mod visualizer;
 pub mod widgets;
 pub mod window_frame;
+pub mod youtube_job;
 
 pub use app::{MIN_WINDOW_SIZE, ResonanceApp};
 pub use player::Player;

@@ -61,6 +61,12 @@ pub struct Network<'a> {
     pub artwork_sources: [&'static mp_net::Source; 2],
     /// How the artwork pass is getting on, when it is running.
     pub artwork: Option<crate::artwork_job::Status>,
+    /// The services a link is played through. Two again, and for a sharper
+    /// reason: the audio and the picture come from different places, and one
+    /// of them is not fetched by this application at all.
+    pub youtube_sources: [&'static mp_net::Source; 2],
+    /// Whether the program that fetches a link is installed, and which copy.
+    pub yt_dlp: Option<&'a crate::youtube_job::ToolStatus>,
     /// Entries in the log, including the ones that never left the machine.
     pub entries: usize,
     /// How many of those were actual requests.
@@ -129,6 +135,14 @@ pub struct SettingsOutcome {
     /// cache and stay attached, because throwing away a picture the user can
     /// see is a bigger action than the button appears to offer.
     pub clear_artwork_cache: bool,
+    /// Throw away the audio fetched from links.
+    ///
+    /// Unlike the two above this really does delete files, because that is the
+    /// only thing that would be deleted: every one of them can be fetched
+    /// again by playing the link again.
+    pub clear_fetched_audio: bool,
+    /// Open the box that plays a pasted link.
+    pub open_url: bool,
 
     /// The output device or buffer size changed; the stream has to be
     /// reopened for it to take effect.
@@ -1321,6 +1335,79 @@ fn online_section(
 
         ui.add_space(m.space(1.5));
 
+        row(
+            ui,
+            theme,
+            "Play from a link",
+            "Play a YouTube or YouTube Music link, fetched to this machine first",
+            |ui| {
+                ui.checkbox(&mut config.privacy.online_youtube, "")
+                    .changed()
+            },
+        )
+        .apply(out);
+
+        if config.privacy.online_youtube {
+            ui.add_space(m.space(1.0));
+
+            for source in network.youtube_sources {
+                note(
+                    ui,
+                    theme,
+                    &format!(
+                        "{} — {} Sends: {}",
+                        source.label, source.purpose, source.sends
+                    ),
+                );
+
+                if let Some(elsewhere) = source.also_contacts {
+                    note(
+                        ui,
+                        theme,
+                        &format!(
+                            "The audio itself arrives from {elsewhere} rather than from {}.",
+                            source.host
+                        ),
+                    );
+                }
+
+                // The sharpest thing on this screen, and the reason the field
+                // exists: everything else here is a request Resonance makes.
+                // This one is not, so it is the one thing reading the source
+                // of this application cannot account for, and saying so is the
+                // whole point of the section.
+                if let Some(program) = source.via {
+                    note(
+                        ui,
+                        theme,
+                        &format!(
+                            "Those requests are made by {program}, a separate program you install yourself, and not by Resonance. Every one of them is still written to the activity log.",
+                        ),
+                    );
+                }
+            }
+
+            note(
+                ui,
+                theme,
+                "The audio is fetched into this app's cache and played from there. Nothing is added to your library, nothing is written to your music folders, and no account or cookie is ever involved.",
+            );
+
+            if let Some(status) = network.yt_dlp {
+                ui.add_space(m.space(1.0));
+                note(ui, theme, &status.summary());
+
+                if status.is_installed() {
+                    ui.add_space(m.space(1.0));
+                    if widgets::accent_button(ui, theme, "Play from a link").clicked() {
+                        out.open_url = true;
+                    }
+                }
+            }
+        }
+
+        ui.add_space(m.space(1.5));
+
         // The log is the feature that makes any of the above checkable rather
         // than merely stated, so it is shown whether or not fetching is on —
         // including the case where the honest number is zero.
@@ -1355,6 +1442,18 @@ fn online_section(
                 .clicked()
             {
                 out.clear_artwork_cache = true;
+            }
+
+            ui.add_space(m.space(0.75));
+
+            if ui
+                .button("Clear fetched audio")
+                .on_hover_text(
+                    "Delete the audio fetched from links. Anything you play again is fetched again; nothing in your library is touched.",
+                )
+                .clicked()
+            {
+                out.clear_fetched_audio = true;
             }
         });
     });
@@ -1632,6 +1731,8 @@ mod tests {
                 &mp_net::source::COVER_ART_ARCHIVE,
             ],
             artwork: None,
+            youtube_sources: [&mp_net::source::YOUTUBE, &mp_net::source::YOUTUBE_THUMBNAIL],
+            yt_dlp: None,
             entries,
             requests,
             log_path: None,

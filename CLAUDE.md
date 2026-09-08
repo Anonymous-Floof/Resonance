@@ -62,6 +62,18 @@ what the application can talk to, and the activity log becomes a partial record
 that looks like a whole one. `cargo tree --workspace -i ureq` should always
 name exactly one crate.
 
+**One thing this cannot cover, and it is declared rather than hidden.**
+`yt-dlp` fetches YouTube audio, and a child process makes its own requests:
+they do not go through `Transport`, they are not in `cargo tree`, and nothing
+here can intercept them. So the rule is now that every request is *made or
+commissioned* by `mp-net`, and both kinds are disclosed. `Source::via` names
+the program, `crates/mp-net/src/tool.rs` holds the one seam that starts a
+process, the settings screen prints the program's name before the feature can
+be switched on, and every invocation lands in the activity log with the host
+that actually served it. If a second delegate is ever wanted, stop: one is an
+exception worth declaring, two is a hole, and there is a test asserting the
+count stays at one.
+
 Fetchers take a `Transport`, never `Http` directly — that is what keeps the
 suite offline. **No test may open a socket.** For checking a real service, add
 an example like `lyrics_probe` instead.
@@ -93,7 +105,7 @@ this.
 ## Checks before any commit
 
 ```bash
-cargo test --workspace          # 884 tests
+cargo test --workspace          # 942 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all
 ```

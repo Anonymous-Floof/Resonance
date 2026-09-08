@@ -9,6 +9,7 @@
 //! The UI never blocks on the engine: commands are fire-and-forget, and
 //! everything read back is either an atomic or an event drained once a frame.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -59,6 +60,24 @@ impl NowPlaying {
         }
     }
 
+    /// What is known about a track that arrived over the network.
+    fn from_stream(path: PathBuf, facts: &StreamFacts, duration: Option<Duration>) -> Self {
+        Self {
+            path,
+            title: facts.title.clone(),
+            artist: facts.artist.clone(),
+            album: facts.album.clone(),
+            // Nowhere to point: a fetched track has no library row, so the
+            // artist and album names are text rather than links.
+            artist_id: None,
+            album_id: None,
+            art_id: facts.art_id.clone(),
+            // The engine's measured duration is authoritative here too, and
+            // more so: what a video reports is often a second or two out.
+            duration: duration.or(facts.duration),
+        }
+    }
+
     fn from_track(track: &Track, duration: Option<Duration>) -> Self {
         Self {
             path: track.path.clone(),
@@ -81,6 +100,27 @@ impl NowPlaying {
             None => self.artist.clone(),
         }
     }
+}
+
+/// What is known about a track that is not in the library.
+///
+/// A fetched track is deliberately *not* a library row. The scanner deletes
+/// any row whose file it did not find while walking the watched folders, so
+/// one pointing into the cache would be destroyed on the next pass — and a
+/// cache file is not something the user chose to have in their library anyway.
+///
+/// That leaves nothing for [`NowPlaying::from_track`] to read, and
+/// [`NowPlaying::from_path`] would show a video id and "Unknown Artist". These
+/// are the facts the fetcher already knew, kept until the track actually
+/// starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamFacts {
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    /// A cover already stored in the art cache, if one was found.
+    pub art_id: Option<String>,
+    pub duration: Option<Duration>,
 }
 
 /// How much of a track has to be heard before it counts as a *play*.
@@ -224,6 +264,12 @@ pub struct Player {
     /// frame. This lets that work be cached against something cheap to compare.
     queue_revision: u64,
 
+    /// What is known about queued tracks that have no library row.
+    ///
+    /// Bounded by the queue: replacing the queue drops the facts for anything
+    /// no longer in it.
+    stream_facts: HashMap<PathBuf, StreamFacts>,
+
     /// Progress towards counting the open track as played.
     listening: Option<Listening>,
 
@@ -264,6 +310,7 @@ impl Player {
             queue: Vec::new(),
             current_index: None,
             queue_revision: 0,
+            stream_facts: HashMap::new(),
             listening: None,
             sleep: None,
             last_played: None,
@@ -324,6 +371,9 @@ impl Player {
         if paths.is_empty() || start >= paths.len() {
             return;
         }
+        // A fetched track's facts are only wanted while it is queued.
+        self.stream_facts.retain(|path, _| paths.contains(path));
+
         // Seeded in the order asked for so the transport works this frame; the
         // engine corrects it to the real play order on its next event.
         self.queue_revision = self.queue_revision.wrapping_add(1);
@@ -431,6 +481,16 @@ impl Player {
 
     pub fn previous(&self) {
         self.send(Command::Previous);
+    }
+
+    /// Play a track that came from a link, with what is known about it.
+    ///
+    /// Separate from [`Self::play`] only because the facts have to be recorded
+    /// before the engine reports the track as started — otherwise the player
+    /// bar shows a video id for a frame and then corrects itself.
+    pub fn play_stream(&mut self, path: PathBuf, facts: StreamFacts) {
+        self.stream_facts.insert(path.clone(), facts);
+        self.play(vec![path], 0);
     }
 
     pub fn seek_fraction(&self, fraction: f32) {
@@ -596,10 +656,17 @@ impl Player {
                         self.notice("Sleep timer finished.".to_owned(), false);
                     }
 
-                    self.now_playing = Some(match library.track_at_path(&path) {
-                        Some(track) => NowPlaying::from_track(&track, duration),
-                        None => NowPlaying::from_path(path.clone(), duration),
-                    });
+                    // Facts first: a fetched track is never in the index,
+                    // so asking the library would always miss and fall through
+                    // to the filename, which for these is a video id.
+                    let now = match self.stream_facts.get(&path) {
+                        Some(facts) => NowPlaying::from_stream(path.clone(), facts, duration),
+                        None => match library.track_at_path(&path) {
+                            Some(track) => NowPlaying::from_track(&track, duration),
+                            None => NowPlaying::from_path(path.clone(), duration),
+                        },
+                    };
+                    self.now_playing = Some(now);
                     self.current_index = Some(index);
 
                     // A track that was not heard for long enough simply does

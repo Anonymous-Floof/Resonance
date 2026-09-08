@@ -39,6 +39,8 @@ pub enum Action {
     ToggleQueue,
     ToggleFullScreen,
     FocusSearch,
+    /// Open the box that plays a pasted link.
+    PlayFromLink,
     /// Back out of whatever is open: the search, a drill-down, full screen.
     Escape,
 }
@@ -70,6 +72,7 @@ impl Action {
             Self::ToggleQueue => "Queue panel",
             Self::ToggleFullScreen => "Full screen",
             Self::FocusSearch => "Search",
+            Self::PlayFromLink => "Play from a link",
             Self::Escape => "Back out / clear search",
         }
     }
@@ -94,6 +97,7 @@ pub const BINDINGS: &[(Modifiers, Key, Action)] = &[
     (Modifiers::NONE, Key::Q, Action::ToggleQueue),
     (Modifiers::NONE, Key::F11, Action::ToggleFullScreen),
     (Modifiers::CTRL, Key::F, Action::FocusSearch),
+    (Modifiers::CTRL, Key::U, Action::PlayFromLink),
     (Modifiers::NONE, Key::Escape, Action::Escape),
 ];
 

@@ -476,9 +476,9 @@ pub struct Privacy {
     pub bundle_statistics: bool,
     /// Look up lyrics online for tracks that have none on disk.
     ///
-    /// **Off by default, and the only thing in this build that makes a
-    /// request.** With it off there is no traffic at all: not a check, not a
-    /// heartbeat, nothing.
+    /// **Off by default**, and the first thing in this build that ever made
+    /// a request. With everything in this section off there is no traffic at
+    /// all: not a check, not a heartbeat, nothing.
     ///
     /// With it on, a track that has no `.lrc` beside it and no lyrics in its
     /// tags causes one request to LRCLIB carrying that track's artist, title
@@ -523,6 +523,44 @@ pub struct Privacy {
     /// The image is stored in the app's own cache. **No audio file is written
     /// to, and no tag is added.**
     pub online_artwork: bool,
+
+    /// Play audio from a YouTube or YouTube Music link.
+    ///
+    /// Off by default, like everything else here, and the only one of these
+    /// that does not merely decorate a track you already have — it is how a
+    /// track arrives in the first place.
+    ///
+    /// **This one needs a program that is not shipped with Resonance.**
+    /// Turning a link into a playable stream is a moving target that `yt-dlp`
+    /// follows full time, so Resonance asks it rather than reimplementing it.
+    /// It is never bundled and never downloaded; if it is not installed, this
+    /// setting says so and does nothing. See [`Self::yt_dlp_path`].
+    ///
+    /// What that means for the promise the rest of this section makes: the
+    /// requests to YouTube are made by that program and not by Resonance, so
+    /// they are the one thing `cargo tree` cannot account for. They are named
+    /// in the source registry, disclosed on the settings screen before this
+    /// can be switched on, and written to the activity log like any other
+    /// request — including the host that actually served the audio, which is
+    /// one of Google's media servers rather than `youtube.com`.
+    ///
+    /// The audio is fetched to the app's own cache and played from there.
+    /// **Nothing is written to the music folders, and no library file is
+    /// touched.** The cache has a size ceiling and forgets the least recently
+    /// played first.
+    ///
+    /// No account is involved. Nothing identifying the user is sent, and no
+    /// cookie or credential is ever passed to the program.
+    pub online_youtube: bool,
+
+    /// Where `yt-dlp` is, when it is not on `PATH`.
+    ///
+    /// `None` means look on `PATH`, which is right on most machines. A path
+    /// given here is used exactly as given or not at all: quietly falling back
+    /// would run a different program than the one named on screen, and the
+    /// whole point of showing it is that the user can go and check what they
+    /// installed.
+    pub yt_dlp_path: Option<PathBuf>,
 }
 
 impl Default for Privacy {
@@ -536,6 +574,11 @@ impl Default for Privacy {
             online_lyrics_any_release: false,
             // And again. This one reaches two services rather than one.
             online_artwork: false,
+            // And again, and this one hardest of all: it is the only feature
+            // here whose requests Resonance does not make itself.
+            online_youtube: false,
+            // Look on PATH. Nothing is bundled and nothing is downloaded.
+            yt_dlp_path: None,
         }
     }
 }

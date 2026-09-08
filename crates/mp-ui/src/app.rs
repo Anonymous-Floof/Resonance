@@ -34,6 +34,7 @@ use crate::theme::{Theme, col, col_alpha};
 use crate::views::{self, View, browse};
 use crate::visualizer::Visualizers;
 use crate::widgets::{self, icons::Icon};
+use crate::youtube_job::{Answer as LinkAnswer, ToolStatus, YoutubeJob};
 
 /// Settings are saved this long after the last edit, so dragging a slider
 /// writes the file once rather than sixty times a second.
@@ -91,6 +92,21 @@ pub struct ResonanceApp {
     /// same reason: "off" should mean no thread exists that could make a
     /// request, not a flag consulted somewhere inside one.
     artwork_job: Option<ArtworkJob>,
+    /// Started and stopped by [`Self::tend_youtube`], on the same principle,
+    /// with one extra condition: the program it drives has to be installed.
+    youtube_job: Option<YoutubeJob>,
+
+    /// What was found when `yt-dlp` was last looked for, and the setting it
+    /// was looked for with.
+    ///
+    /// Cached because looking runs the program to ask its version, which must
+    /// not happen while a frame is being drawn. Recomputed only when that
+    /// setting changes.
+    yt_dlp: Option<ToolStatus>,
+    yt_dlp_looked_for: Option<std::path::PathBuf>,
+
+    /// The box that plays a pasted link.
+    open_url: views::open_url::OpenUrl,
 
     /// Whether the first-run welcome is still showing.
     ///
@@ -242,6 +258,10 @@ impl ResonanceApp {
             activity,
             lyrics_job: None,
             artwork_job: None,
+            youtube_job: None,
+            yt_dlp: None,
+            yt_dlp_looked_for: None,
+            open_url: views::open_url::OpenUrl::default(),
             welcome: first_run,
             focus_search: false,
             media,
@@ -2133,6 +2153,198 @@ impl ResonanceApp {
         }
     }
 
+    /// Start and stop the link worker, and take whatever it has finished.
+    ///
+    /// Two conditions rather than one: the setting has to be on *and* the
+    /// program has to be there. A worker that could never succeed is worse
+    /// than no worker, because the failure would arrive one link at a time
+    /// instead of once, on the settings screen, where it can be fixed.
+    fn tend_youtube(&mut self, ctx: &egui::Context) {
+        let wanted = self.config.privacy.online_youtube;
+
+        // Looked for once, and again only if the setting changed. This runs
+        // the program, so it must not become a per-frame cost.
+        if wanted
+            && (self.yt_dlp.is_none() || self.yt_dlp_looked_for != self.config.privacy.yt_dlp_path)
+        {
+            self.yt_dlp_looked_for = self.config.privacy.yt_dlp_path.clone();
+            self.yt_dlp = Some(ToolStatus::look(self.config.privacy.yt_dlp_path.as_deref()));
+        }
+
+        let installed = self.yt_dlp.as_ref().is_some_and(ToolStatus::is_installed);
+
+        match (wanted && installed, self.youtube_job.is_some()) {
+            (true, false) => {
+                if let Some(tool) =
+                    mp_net::tool::YtDlp::locate(self.config.privacy.yt_dlp_path.as_deref())
+                {
+                    self.youtube_job = YoutubeJob::start(
+                        tool,
+                        self.paths.cache_dir().to_path_buf(),
+                        self.paths.fetched_audio_dir(),
+                        self.paths.art_cache_dir(),
+                        Arc::clone(&self.activity),
+                        ctx.clone(),
+                    );
+                }
+            }
+            // Dropping the handle closes the channel, which ends the thread.
+            (false, true) => self.youtube_job = None,
+            _ => {}
+        }
+
+        // Forget what was found once the feature is off, so switching it back
+        // on looks again rather than trusting a stale answer.
+        if !wanted {
+            self.yt_dlp = None;
+            self.yt_dlp_looked_for = None;
+        }
+
+        let Some(job) = &mut self.youtube_job else {
+            return;
+        };
+
+        let Some(answer) = job.poll() else {
+            return;
+        };
+
+        match answer {
+            LinkAnswer::Ready { path, facts } => {
+                self.open_url.close();
+                self.player.play_stream(path, *facts);
+            }
+            LinkAnswer::Nothing { why } => {
+                // Left on the dialog rather than raised as a notice: the user
+                // is looking at the box they typed into, and the link is still
+                // in it to be corrected.
+                if self.open_url.is_open() {
+                    self.open_url.set_problem(why);
+                } else {
+                    self.player.notice(why, true);
+                }
+            }
+        }
+
+        ctx.request_repaint();
+    }
+
+    /// The box that plays a pasted link.
+    fn open_url_dialog(&mut self, ctx: &egui::Context) {
+        if !self.open_url.is_open() {
+            return;
+        }
+
+        // Switching the feature off with the box open should close it, rather
+        // than leave a dialog whose button can no longer do anything. Only the
+        // setting, though: a missing worker is reported inside the box, because
+        // closing it silently would look like the app ignoring a keypress.
+        if !self.config.privacy.online_youtube {
+            self.open_url.close();
+            return;
+        }
+
+        let working = self.youtube_job.as_ref().and_then(YoutubeJob::working);
+
+        let outcome = views::open_url::show(ctx, &self.theme, &mut self.open_url, working);
+
+        if outcome.play {
+            let link = self.open_url.text().to_owned();
+            // The two ways this goes nowhere are different problems with
+            // different fixes, and naming the wrong one costs an afternoon. A
+            // busy worker is not among them: the button and the Enter key are
+            // both held down while one is running.
+            let problem = match self.youtube_job.as_mut() {
+                Some(job) => {
+                    if job.want(&link) {
+                        None
+                    } else {
+                        Some(
+                            "That is not a link to a video this recognises. A YouTube or YouTube Music watch link, or a youtu.be one.",
+                        )
+                    }
+                }
+                None => Some(
+                    "yt-dlp was not found, so links cannot be played. Settings, Online says where it looked.",
+                ),
+            };
+
+            if let Some(problem) = problem {
+                self.open_url.set_problem(problem.to_owned());
+            }
+        }
+
+        // Closing while something is in flight leaves it running: it will
+        // finish, and the track will start. Cancelling a download the user
+        // asked for because they dismissed a box would be the ruder choice.
+        if outcome.close {
+            self.open_url.close();
+        }
+    }
+
+    /// Open the link box, or say why it is not available.
+    fn ask_for_link(&mut self) {
+        if !self.config.privacy.online_youtube {
+            self.player.notice(
+                "Playing from a link is off. Settings, Online.".to_owned(),
+                false,
+            );
+            return;
+        }
+
+        // `None` means it has not been looked for yet, which happens only on
+        // the first frame of a session that starts with this already on:
+        // shortcuts are dispatched before the workers are tended. Opening is
+        // right there, because by the time the box is drawn the worker exists,
+        // and if it does not the box says so itself.
+        if self
+            .yt_dlp
+            .as_ref()
+            .is_some_and(|status| !status.is_installed())
+        {
+            self.player.notice(
+                "yt-dlp was not found, so links cannot be played. Settings, Online.".to_owned(),
+                true,
+            );
+            return;
+        }
+
+        self.open_url.open();
+    }
+
+    /// Throw away the audio fetched from links.
+    fn clear_fetched_audio(&mut self) {
+        let dir = self.paths.fetched_audio_dir();
+
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            self.player
+                .notice("There is no fetched audio to forget.".to_owned(), false);
+            return;
+        };
+
+        let mut removed = 0;
+        let mut kept = 0;
+
+        for entry in entries.flatten() {
+            // Whatever is playing is open, and Windows will refuse to remove
+            // it. That is the right answer, so it is counted rather than
+            // fought with.
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => removed += 1,
+                Err(_) => kept += 1,
+            }
+        }
+
+        let message = match (removed, kept) {
+            (0, 0) => "There was no fetched audio to forget.".to_owned(),
+            (removed, 0) => format!("Forgot {removed} fetched track(s)."),
+            (removed, kept) => {
+                format!("Forgot {removed} fetched track(s); {kept} still in use.")
+            }
+        };
+
+        self.player.notice(message, false);
+    }
+
     fn playlists_view(&mut self, ui: &mut Ui) {
         let outcome = views::playlists::show(
             ui,
@@ -2456,6 +2668,7 @@ impl ResonanceApp {
 
             // Ordered by what is most enclosing, so one press backs out of one
             // thing rather than everything at once.
+            Action::PlayFromLink => self.ask_for_link(),
             Action::Escape => {
                 if self.immersive.is_open() {
                     self.immersive.close();
@@ -2889,6 +3102,8 @@ impl ResonanceApp {
                     entries: self.activity.len(),
                     requests: self.activity.requests_made(),
                     log_path: log_path.as_deref(),
+                    youtube_sources: [&mp_net::source::YOUTUBE, &mp_net::source::YOUTUBE_THUMBNAIL],
+                    yt_dlp: self.yt_dlp.as_ref(),
                 },
             },
         );
@@ -2903,6 +3118,14 @@ impl ResonanceApp {
 
         if outcome.clear_lyrics_cache {
             self.clear_lyrics_cache();
+        }
+
+        if outcome.clear_fetched_audio {
+            self.clear_fetched_audio();
+        }
+
+        if outcome.open_url {
+            self.ask_for_link();
         }
 
         if let Some(choice) = outcome.set_sleep {
@@ -3197,6 +3420,7 @@ impl eframe::App for ResonanceApp {
         self.tend_analysis();
         self.tend_lyrics(ui.ctx());
         self.tend_artwork(ui.ctx());
+        self.tend_youtube(ui.ctx());
 
         // Lyrics are read from disk, so this only does anything while the
         // full-screen view is open and the track has changed under it. The
@@ -3293,6 +3517,7 @@ impl eframe::App for ResonanceApp {
         // Above the notices and below the window chrome: a modal dialog has to
         // sit over the content it is editing.
         self.tag_editor_dialog(ui.ctx());
+        self.open_url_dialog(ui.ctx());
 
         // Foreground layers, so they sit above the panels rather than under.
         let ctx = ui.ctx();

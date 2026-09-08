@@ -4,6 +4,7 @@ pub mod browse;
 pub mod equalizer;
 pub mod home;
 pub mod now_playing;
+pub mod open_url;
 pub mod playlists;
 pub mod queue;
 pub mod settings;

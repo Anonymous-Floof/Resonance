@@ -4,8 +4,9 @@
 > to opt out of. This build can reach the network, and everything it can reach
 > is listed below and switched off until you turn it on.
 >
-> Right now that is two things: fetching lyrics for tracks that have none, and
-> cover art for albums that have none. See [Online lookups](#online-lookups),
+> Right now that is three things: fetching lyrics for tracks that have none,
+> cover art for albums that have none, and playing a YouTube link. See
+> [Online lookups](#online-lookups),
 > and [BRANCH.md](BRANCH.md) for why the two builds exist.
 
 > [!NOTE]
@@ -36,6 +37,7 @@ with the operating system.
   - [Where your files live](#where-your-files-live)
   - [Editing tags safely](#editing-tags-safely)
   - [Online lookups](#online-lookups)
+  - [Playing from a link](#playing-from-a-link)
   - [Format support](#format-support)
 - [For developers](#for-developers) — build it and change it
   - [Build and run](#build-and-run)
@@ -107,9 +109,10 @@ with the operating system.
 - **Never modifies your audio files.** Tag editing is off by default, and every
   edit it does make is reversible from a history panel.
 - **Nothing leaves your machine unless you switch it on.** Your library and
-  suggestions are built locally and always have been. Two features reach out —
-  [lyrics and cover art](#online-lookups) — both are off by default, and
-  Settings names every service and says exactly what it would send.
+  suggestions are built locally and always have been. Three features reach
+  out — [lyrics, cover art and playing a link](#online-lookups) — all are off
+  by default, and Settings names every service and says exactly what it would
+  send.
 - **Never writes to your music files.** A fetched cover goes into the app's own
   cache, not into your tags and not into your folders.
 - **Every request is written down** in a plain text file you can read, whether
@@ -219,6 +222,7 @@ Two things worth knowing:
 | `Q` | Queue panel |
 | `F11` | Full-screen now playing |
 | `Ctrl` + `F` | Search |
+| `Ctrl` + `U` | Play from a link |
 | `Esc` | Back out, or clear the search |
 
 Single-key shortcuts are ignored while you are typing in a text box, so you can
@@ -264,8 +268,9 @@ refuses rather than overwriting whatever did it.
 
 ## Online lookups
 
-This build can look things up online. It does exactly one thing, it is **off
-until you switch it on**, and this section is the whole of what it does.
+This build can look things up online, and play a link. Everything it can
+reach is **off until you switch it on**, and this section is the whole of what
+it does.
 
 ### Fetching lyrics
 
@@ -348,6 +353,51 @@ does much less for loose singles and YouTube rips, which usually have no album
 at all. **Settings → Online → Clear cached artwork** forgets which albums have
 been searched so they are tried again; covers already found stay put.
 
+### Playing from a link
+
+**Settings → Online → Play from a link.** Off by default. Then `Ctrl` + `U`,
+or the button in that same section.
+
+Paste a YouTube or YouTube Music link and it plays. The audio is fetched to
+Resonance's own cache first and played from there, so it is an ordinary file by
+the time it reaches the player — which is why seeking, the equalizer, the
+visualizers and everything else work on it exactly as they do on your own
+music.
+
+> [!IMPORTANT]
+> **This one needs a program Resonance does not ship.** Turning a link into a
+> playable stream is a moving target, and [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+> follows it full time. Resonance asks it rather than doing it badly.
+>
+> Install yt-dlp and Resonance finds it on your `PATH`. It is **never bundled
+> and never downloaded for you** — an app that fetched and ran an executable on
+> your behalf would be a much larger thing to trust. Settings shows which copy
+> it found and what version it is.
+
+| | |
+|---|---|
+| **Where it goes** | `youtube.com`, and `i.ytimg.com` for the cover |
+| **Also contacted** | `googlevideo.com` — the audio itself arrives from Google's media servers rather than from `youtube.com`. The activity log records which one actually answered |
+| **What is sent** | The link you gave it. **No account, no cookie, no identifier**, and nothing from your library, your tags or your files |
+| **Who sends it** | The YouTube requests are made by **yt-dlp**, not by Resonance. This is the one thing `cargo tree` cannot account for, which is exactly why it is written here and on the settings screen. They are still logged |
+| **When** | Only when you paste a link |
+| **If it fails** | Nothing plays, and the box says why |
+
+**Nothing is added to your library, and nothing is written to your music
+folders.** A fetched track plays from the cache and is gone from the library's
+point of view the moment it stops; your index, your play counts and your
+folders are untouched.
+
+The cache has a ceiling of 2 GB and forgets the oldest first. **Settings →
+Online → Clear fetched audio** empties it now — anything you play again is
+simply fetched again.
+
+**Quality, and an honest limitation.** YouTube's best audio is Opus, and
+Resonance [cannot decode Opus](#format-support). So it asks for the AAC stream
+instead, which is a little lower quality and is the one that actually plays. A
+video offering nothing but Opus is reported as unplayable rather than
+downloaded and then failed on.
+
 ### Checking what it actually did
 
 Every lookup is written to a plain text file, one line each, including the ones
@@ -427,8 +477,8 @@ Two further things make this worse for some collections than others:
   shows the exact artist and title that were sent, which is usually enough to
   see what is wrong with the tags.
 
-Nothing else in Resonance touches the network. Your library, artwork,
-suggestions and statistics are all built on your own machine, and always were.
+Nothing else in Resonance touches the network. Your library, suggestions and
+statistics are all built on your own machine, and always were.
 
 ## Format support
 
@@ -436,7 +486,9 @@ Everything `symphonia` decodes: **MP3, AAC/M4A, ALAC, FLAC, Vorbis, WAV, AIFF,
 CAF** and Matroska.
 
 **Opus is not supported.** `symphonia` ships no Opus decoder, and adding one
-means a C dependency on libopus. Opus files are listed as unplayable *with a
+means a C dependency on libopus. This is also why
+[playing a link](#playing-from-a-link) fetches the AAC stream rather than the
+better-sounding Opus one. Opus files are listed as unplayable *with a
 reason* rather than silently disappearing — as is anything else that fails to
 decode.
 
@@ -505,6 +557,15 @@ take on trust:
 cargo tree --workspace -i ureq
 ```
 
+One thing that check cannot see, so it is written down instead: **`yt-dlp`
+makes its own requests.** [Playing a link](#playing-from-a-link) runs it as a
+child process, and a child process is not in anybody's dependency tree. That is
+a real gap in the claim above, which is why the program is named in the source
+registry, on the settings screen before the feature can be switched on, and in
+every log line it produces. `crates/mp-net/src/tool.rs` is the only place in
+the workspace that starts a process, and a test asserts it stays the only
+delegate.
+
 Fetchers talk to a `Transport` trait rather than to the HTTP client, so misses,
 rate limits, dead servers and garbage responses are all tested against a
 scripted fake. **No test in the workspace opens a socket.**
@@ -512,7 +573,7 @@ scripted fake. **No test in the workspace opens a socket.**
 ## Tests
 
 ```bash
-cargo test --workspace          # 884 tests
+cargo test --workspace          # 942 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```
@@ -591,6 +652,21 @@ format, and which host actually served it. **This one uses the network.**
 Useful for seeing the strict matching work: give it a real artist and an album
 they never made and it reports how many releases came back and that none of
 them were the right one.
+
+**A link will not play**
+
+```bash
+cargo run -p mp-net --example youtube_probe -- "https://youtu.be/jNQXAC9IVRw"
+```
+Resolves one link and prints what came back, which yt-dlp it used and what
+version, and the log lines it produced. Add `--fetch` to download the audio as
+well and report what container it turned out to be. **This one uses the network
+and runs yt-dlp.**
+
+The unit tests answer from a scripted fake, which proves the parsing and proves
+nothing about whether yt-dlp still reports the fields this expects — and that
+is the part most likely to break, because the service changes and yt-dlp
+follows it.
 
 **Checking for regressions**
 

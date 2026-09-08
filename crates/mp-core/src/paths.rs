@@ -129,6 +129,18 @@ impl AppPaths {
     pub fn log_dir(&self) -> PathBuf {
         self.data_dir.join("logs")
     }
+
+    /// Audio fetched from a link, waiting to be played.
+    ///
+    /// The cache directory rather than the data directory, and deliberately:
+    /// this is the one place in the app holding files that can be recreated by
+    /// asking again, so it is the one place that may be deleted at will. It is
+    /// also nowhere near the user's music, which is what keeps "nothing is
+    /// ever written next to your music" true of a feature that downloads
+    /// audio.
+    pub fn fetched_audio_dir(&self) -> PathBuf {
+        self.cache_dir.join("audio")
+    }
 }
 
 /// Where portable mode would store things, if it is switched on.
@@ -187,6 +199,7 @@ mod tests {
             paths.library_db(),
             paths.art_cache_dir(),
             paths.log_dir(),
+            paths.fetched_audio_dir(),
         ] {
             assert!(
                 path.starts_with(&root),

@@ -28,7 +28,8 @@ branch is for.
 Everything the offline constraint made impossible:
 
 - **Lyrics fetching** — done, via LRCLIB
-- Artwork fetching for tracks with none embedded and no sidecar
+- **Artwork fetching** — done, via MusicBrainz and the Cover Art Archive
+- **Playing a YouTube link** — done, via `yt-dlp`
 - Artist and genre metadata, MusicBrainz-style
 - Whatever else you have planned
 
@@ -160,7 +161,44 @@ Two things the list did not anticipate:
 
 One thing to carry forward: `cache_ttl_days` is still not a setting, because a
 fixed fortnight for misses needed no knob. A constant that does the job is
-better than a control that does not need to exist.
+better than a control that does not need to exist. The same reasoning kept the
+fetched-audio cache to a fixed 2 GB ceiling.
+
+## The one that broke the shape, and what it cost
+
+Playing a link did not fit. Every source before it was a request this crate
+makes; this one is made by `yt-dlp`, because turning a link into a stream is a
+moving target and a music player would follow it badly.
+
+That is a genuine hole in *"read this crate and you know what the application
+talks to"* — `cargo tree -i ureq` cannot see a child process. The answer was
+not to hide it:
+
+- `Source::via` names the program, and a test asserts there is never more than
+  one delegate. One is an exception worth declaring; two is a hole.
+- `redirected_to` became `also_contacts`, because YouTube does not redirect —
+  it hands back a manifest and the audio arrives from `googlevideo.com`.
+  Different mechanism, same user-visible fact, and the old name only described
+  the first one.
+- `crates/mp-net/src/tool.rs` is the only place in the workspace that starts a
+  process, and `Runner` is to processes what `Transport` is to sockets. No test
+  spawns one, just as none opens a socket.
+- The README's `cargo tree` claim now carries the caveat rather than quietly
+  being wrong.
+
+Two more things that fell out of it and are worth knowing before the next
+feature:
+
+**Fetch, then play.** The audio is downloaded to the cache and played as a
+file. Streaming would have meant teaching the queue, the seek bar, the
+crossfade and the gapless seam about latency and refused seeks; fetching first
+meant `mp-audio` did not change at all. On a slow connection it is the better
+trade anyway.
+
+**A fetched track is not a library row.** The scanner deletes any row whose
+file it did not find while walking the watched folders, so one pointing into
+the cache would not survive the next scan — and a cache file is not something
+the user chose to index. `Player` carries the display facts instead.
 
 ## Working across the two
 
