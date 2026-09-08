@@ -619,7 +619,7 @@ changed. Before trusting a clean result, `cargo clean` first.
 
 ## Diagnostic examples
 
-Ten examples exist for things unit tests cannot reach. All are headless
+Twelve examples exist for things unit tests cannot reach. All are headless
 unless noted.
 
 **Something will not play, or plays wrong**

@@ -47,6 +47,21 @@ config.v*.bak.toml
 # Byte-code from the icon generator.
 __pycache__/
 
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+#
+# Nothing in this build needs a key or an account today - playing a link is
+# anonymous and yt-dlp is never given a credential. This is here before that
+# stops being true, because the commit that first needs one is exactly the
+# commit where nobody is thinking about .gitignore.
+.env
+.env.*
+*.secret
+client_secret*.json
+credentials.json
+token.json
+
 # Editors and OS clutter.
 .vscode/
 .idea/
