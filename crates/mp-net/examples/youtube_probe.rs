@@ -63,7 +63,7 @@ fn main() {
     );
 
     match client.resolve(&query) {
-        Some(resolved) => {
+        Ok(resolved) => {
             println!("  title:     {}", resolved.title);
             println!("  artist:    {}", resolved.artist);
             println!("  album:     {}", resolved.album.as_deref().unwrap_or("-"));
@@ -82,16 +82,22 @@ fn main() {
             if fetch {
                 println!();
                 match client.fetch_audio(&resolved) {
-                    Some(audio) => {
+                    Ok(audio) => {
                         println!("  fetched:   {}", audio.path.display());
                         println!("  bytes:     {}", audio.bytes);
                         println!("  looks like: {}", sniff(&audio.path));
                     }
-                    None => println!("  no audio"),
+                    Err(trouble) => {
+                        println!("  no audio:  {}", trouble.detail());
+                        println!("  means:     {}", trouble.message());
+                    }
                 }
             }
         }
-        None => println!("  nothing came back"),
+        Err(trouble) => {
+            println!("  nothing came back: {}", trouble.detail());
+            println!("  means:             {}", trouble.message());
+        }
     }
 
     println!();

@@ -1440,6 +1440,13 @@ fn online_section(
                 ui.add_space(m.space(1.0));
                 note(ui, theme, &status.summary());
 
+                // An old copy is the single likeliest reason a link resolves
+                // and then will not play, and it is invisible from the version
+                // string alone unless you happen to know the cadence.
+                if let Some(warning) = status.staleness() {
+                    note(ui, theme, &warning);
+                }
+
                 if status.is_installed() {
                     ui.add_space(m.space(1.0));
                     if widgets::accent_button(ui, theme, "Play from a link").clicked() {

@@ -41,6 +41,26 @@ use crate::player::StreamFacts;
 /// hundred tracks at the bitrate this fetches.
 pub const CACHE_BUDGET: u64 = 2 * 1024 * 1024 * 1024;
 
+/// How old a reported version may be before it is worth mentioning.
+///
+/// yt-dlp releases are dated, which makes this checkable without asking
+/// anybody anything. Three months is well past its release cadence and about
+/// where the trouble starts.
+pub const STALE_AFTER_DAYS: i64 = 90;
+
+/// When a dated version was released.
+///
+/// `2026.03.17`, and nightlies carry a fourth part which is ignored. Anything
+/// that is not a date is `None` rather than a guess.
+fn released_on(version: &str) -> Option<i64> {
+    let mut parts = version.trim().split('.');
+    let year = parts.next()?;
+    let month = parts.next()?;
+    let day = parts.next()?;
+
+    mp_net::timestamp::parse(&format!("{year}-{month}-{day}T00:00:00Z"))
+}
+
 /// Whether the program this needs is installed, and which one.
 ///
 /// Worked out once and kept. Finding out runs the program to ask its version,
@@ -68,6 +88,35 @@ impl ToolStatus {
 
     pub fn is_installed(&self) -> bool {
         self.program.is_some()
+    }
+
+    /// How many days old the reported version is, where it reads as a date.
+    pub fn age_days(&self) -> Option<i64> {
+        let released = released_on(self.version.as_deref()?)?;
+
+        Some((mp_net::timestamp::now_unix() - released) / 86_400)
+    }
+
+    pub fn is_stale(&self) -> bool {
+        self.age_days().is_some_and(|days| days >= STALE_AFTER_DAYS)
+    }
+
+    /// A warning, when the copy that was found is old enough to be the reason
+    /// links are not playing.
+    ///
+    /// Worth saying out loud rather than leaving to the version string,
+    /// because the failure it causes does not look like an out-of-date
+    /// program: the link resolves, the title comes back, and only the audio is
+    /// refused. Somebody reading that reasonably concludes the app is broken.
+    pub fn staleness(&self) -> Option<String> {
+        let days = self.age_days()?;
+
+        (days >= STALE_AFTER_DAYS).then(|| {
+            format!(
+                "That copy is about {} months old. YouTube changes what it demands of a downloader every few weeks, and an old yt-dlp will find a link and then be refused the audio for it. If links are not playing, update it before looking anywhere else.",
+                (days / 30).max(1)
+            )
+        })
     }
 
     /// One line for the settings screen.
@@ -328,22 +377,31 @@ fn run(
     stage.store(Stage::Resolving.code(), Ordering::Relaxed);
     ctx.request_repaint();
 
-    let Some(resolved) = client.resolve(&job.query) else {
-        return Answer::Nothing {
-            why: "Could not read that link. It may be private, removed, or offer no audio this build can play - the activity log says which.".to_owned(),
-        };
+    let resolved = match client.resolve(&job.query) {
+        Ok(resolved) => resolved,
+        // The reason travels with the failure now. Saying only that
+        // nothing happened sent people hunting through the log for a line
+        // that already knew the answer.
+        Err(trouble) => {
+            return Answer::Nothing {
+                why: trouble.message(),
+            };
+        }
     };
 
     stage.store(Stage::Fetching.code(), Ordering::Relaxed);
     ctx.request_repaint();
 
-    let Some(audio) = client.fetch_audio(&resolved) else {
-        return Answer::Nothing {
-            why: format!(
-                "Found \"{}\" but could not fetch the audio.",
-                resolved.title
-            ),
-        };
+    let audio = match client.fetch_audio(&resolved) {
+        Ok(audio) => audio,
+        Err(trouble) => {
+            // Two sentences rather than one joined clause: the reasons
+            // name YouTube and yt-dlp, and lowercasing either to fit after
+            // a comma reads worse than a full stop does.
+            return Answer::Nothing {
+                why: format!("Found {:?}. {}", resolved.title, trouble.message()),
+            };
+        }
     };
 
     // Best effort, and never a reason to fail: a track with no picture still
@@ -659,6 +717,68 @@ mod tests {
         assert!(!status.is_installed());
         assert!(status.summary().contains("not found"));
         assert!(status.summary().contains("never downloaded"));
+    }
+
+    /// The version is a date, which is what makes any of this checkable.
+    #[test]
+    fn a_dated_version_reads_as_a_date() {
+        let released = released_on("2026.03.17").expect("a date");
+        assert_eq!(mp_net::timestamp::format(released), "2026-03-17T00:00:00Z");
+
+        // Nightlies carry a fourth part, which says nothing extra about the day.
+        assert_eq!(released_on("2026.03.17.232301"), Some(released));
+    }
+
+    #[test]
+    fn something_that_is_not_a_date_is_not_guessed_at() {
+        for version in ["", "unknown", "2026", "2026.03", "nightly", "x.y.z"] {
+            assert_eq!(released_on(version), None, "{version}");
+        }
+    }
+
+    /// The exact case that sent somebody to report a broken feature: a copy
+    /// five months behind, resolving links and then being refused the audio.
+    #[test]
+    fn a_copy_from_months_ago_is_called_out() {
+        let status = ToolStatus {
+            program: Some(PathBuf::from("C:/tools/yt-dlp.exe")),
+            version: Some("2020.01.01".into()),
+        };
+
+        assert!(status.is_stale());
+
+        let warning = status.staleness().expect("a warning");
+        assert!(warning.contains("update it"), "{warning}");
+        assert!(warning.contains("refused"), "{warning}");
+    }
+
+    #[test]
+    fn a_current_copy_is_left_alone() {
+        // Built from the clock, so this stays true tomorrow.
+        let today = mp_net::timestamp::format(mp_net::timestamp::now_unix());
+        let version = today[..10].replace('-', ".");
+
+        let status = ToolStatus {
+            program: Some(PathBuf::from("C:/tools/yt-dlp.exe")),
+            version: Some(version.clone()),
+        };
+
+        assert_eq!(status.age_days(), Some(0), "{version}");
+        assert!(!status.is_stale());
+        assert!(status.staleness().is_none());
+    }
+
+    /// No version means no opinion, rather than an alarming guess.
+    #[test]
+    fn a_program_with_no_version_is_not_called_old() {
+        let status = ToolStatus {
+            program: Some(PathBuf::from("C:/tools/yt-dlp.exe")),
+            version: None,
+        };
+
+        assert_eq!(status.age_days(), None);
+        assert!(!status.is_stale());
+        assert!(status.staleness().is_none());
     }
 
     #[test]

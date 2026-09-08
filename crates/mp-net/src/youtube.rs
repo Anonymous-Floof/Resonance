@@ -208,6 +208,79 @@ impl Resolved {
     }
 }
 
+/// Why a link went nowhere, in words that point at the fix.
+///
+/// The distinction that matters is between a video that is genuinely gone and
+/// a service that refused. They look identical from here — both are a failed
+/// run with a message — and they need opposite responses: one is remembered so
+/// it is never asked about again, and the other must not be, because the fix
+/// is an update and a remembered miss would outlive it by a fortnight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Trouble {
+    /// The text named nothing this recognises. Nothing was run.
+    NotALink,
+    /// The video is private, removed, age-gated, or offers no audio this
+    /// build can decode.
+    Unavailable(String),
+    /// `yt-dlp` could not be run, or did not finish in time.
+    Tooling(String),
+    /// YouTube answered and refused.
+    ///
+    /// Nearly always means the extractor is behind rather than anything being
+    /// wrong with the video: the service changes what it demands of a client,
+    /// and a copy of `yt-dlp` from a few months ago cannot produce it. Kept
+    /// apart from the rest because it is the one failure here with an obvious
+    /// fix, and telling somebody to update is only useful if it is said.
+    Refused(String),
+    /// Something else went wrong.
+    Failed(String),
+}
+
+impl Trouble {
+    /// One sentence for the user.
+    pub fn message(&self) -> String {
+        match self {
+            Self::NotALink => {
+                "That is not a link to a video this recognises. A YouTube or YouTube Music watch link, or a youtu.be one.".to_owned()
+            }
+            Self::Unavailable(_) => {
+                "That video is not available - it may be private, removed, age-restricted, or offer no audio this build can play.".to_owned()
+            }
+            Self::Refused(_) => {
+                "YouTube refused the download. This almost always means yt-dlp is out of date: the service changes what it asks of a program that downloads from it, and an old copy cannot answer. Updating yt-dlp is the fix.".to_owned()
+            }
+            Self::Tooling(_) => {
+                "yt-dlp could not be run. Settings, Online says which copy was found.".to_owned()
+            }
+            Self::Failed(_) => "The download did not finish.".to_owned(),
+        }
+    }
+
+    /// What actually went wrong, for the log's detail column.
+    pub fn detail(&self) -> String {
+        match self {
+            Self::NotALink => "not a link to a video".to_owned(),
+            Self::Unavailable(said)
+            | Self::Tooling(said)
+            | Self::Refused(said)
+            | Self::Failed(said) => said.clone(),
+        }
+    }
+
+    /// How this reads to the rate limiter and the log.
+    ///
+    /// A video that is gone is a miss and must not back the limiter off; a
+    /// refusal is a real failure and should.
+    fn as_error(&self) -> NetError {
+        match self {
+            Self::NotALink | Self::Unavailable(_) => NetError::NotFound,
+            Self::Tooling(said) | Self::Refused(said) | Self::Failed(said) => {
+                NetError::Transport(said.clone())
+            }
+        }
+    }
+}
+
 /// A fetched audio file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Audio {
@@ -370,13 +443,18 @@ impl Client {
     /// Find out what a link is.
     ///
     /// **Blocks.** Background threads only.
-    pub fn resolve(&self, query: &Query) -> Option<Resolved> {
-        let video_id = query.video_id()?;
+    pub fn resolve(&self, query: &Query) -> Result<Resolved, Trouble> {
+        let Some(video_id) = query.video_id() else {
+            return Err(Trouble::NotALink);
+        };
+
         let key = query.cache_key();
 
         if let Some(entry) = self.cache.read::<Resolved>(&key) {
             self.log(&YOUTUBE, Outcome::Cached, query.subject(), 0, None, None);
-            return entry.found;
+            return entry.found.ok_or_else(|| {
+                Trouble::Unavailable("remembered from an earlier lookup".to_owned())
+            });
         }
 
         let args = vec![
@@ -403,18 +481,20 @@ impl Client {
                     Some(err.to_string()),
                     None,
                 );
-                return None;
+                return Err(Trouble::Tooling(err.to_string()));
             }
         };
 
         if !output.succeeded() {
-            let err = interpret(&output);
+            let trouble = interpret(&output);
+            let err = trouble.as_error();
             self.note(&err, &self.youtube_limiter);
 
-            // A video that is gone is remembered as a miss; a run that broke
-            // is not, because one bad afternoon should not become a fortnight
-            // of a link refusing to play.
-            if matches!(err, NetError::NotFound) {
+            // Only a video that is genuinely gone is remembered. A refusal is
+            // the extractor being behind rather than anything about the video,
+            // and remembering it would outlive the update that fixes it by a
+            // fortnight.
+            if matches!(trouble, Trouble::Unavailable(_)) {
                 self.store(&key, CacheEntry::<Resolved>::missing());
             }
 
@@ -423,10 +503,10 @@ impl Client {
                 err.outcome(),
                 query.subject(),
                 0,
-                Some(err.to_string()),
+                Some(trouble.detail()),
                 None,
             );
-            return None;
+            return Err(trouble);
         }
 
         self.youtube_limiter.note_success();
@@ -444,7 +524,7 @@ impl Client {
                     Some(err.to_string()),
                     None,
                 );
-                return None;
+                return Err(Trouble::Failed(err.to_string()));
             }
         };
 
@@ -464,17 +544,17 @@ impl Client {
             served_by,
         );
 
-        Some(resolved)
+        Ok(resolved)
     }
 
     /// Get the audio itself, into the cache directory.
     ///
     /// **Blocks, for as long as the download takes.** Background threads only.
-    pub fn fetch_audio(&self, resolved: &Resolved) -> Option<Audio> {
+    pub fn fetch_audio(&self, resolved: &Resolved) -> Result<Audio, Trouble> {
         // The id has been validated to eleven characters of `A-Z a-z 0-9 _ -`,
         // which is what makes it safe to build a path from.
         if !is_video_id(&resolved.video_id) {
-            return None;
+            return Err(Trouble::NotALink);
         }
 
         if let Some(existing) = self.existing_audio(&resolved.video_id) {
@@ -486,12 +566,14 @@ impl Client {
                 None,
                 None,
             );
-            return Some(existing);
+            return Ok(existing);
         }
 
         if let Err(err) = std::fs::create_dir_all(&self.audio_dir) {
             tracing::warn!("could not make room for fetched audio: {err}");
-            return None;
+            return Err(Trouble::Failed(format!(
+                "could not make room for fetched audio: {err}"
+            )));
         }
 
         let template = self
@@ -539,22 +621,23 @@ impl Client {
                     Some(err.to_string()),
                     None,
                 );
-                return None;
+                return Err(Trouble::Tooling(err.to_string()));
             }
         };
 
         if !output.succeeded() {
-            let err = interpret(&output);
+            let trouble = interpret(&output);
+            let err = trouble.as_error();
             self.note(&err, &self.youtube_limiter);
             self.log(
                 &YOUTUBE,
                 err.outcome(),
                 resolved.subject(),
                 0,
-                Some(err.to_string()),
+                Some(trouble.detail()),
                 None,
             );
-            return None;
+            return Err(trouble);
         }
 
         self.youtube_limiter.note_success();
@@ -570,7 +653,9 @@ impl Client {
                 Some("the download reported success and left no file".to_owned()),
                 None,
             );
-            return None;
+            return Err(Trouble::Failed(
+                "the download reported success and left no file".to_owned(),
+            ));
         };
 
         self.log(
@@ -582,7 +667,7 @@ impl Client {
             None,
         );
 
-        Some(audio)
+        Ok(audio)
     }
 
     /// Get the picture that goes with a video.
@@ -715,10 +800,11 @@ impl Client {
 /// rest of the crate draws everywhere: a video that is genuinely not available
 /// is a miss, and must not back the limiter off or be retried forever, while a
 /// run that broke is a failure and should.
-fn interpret(output: &Output) -> NetError {
+fn interpret(output: &Output) -> Trouble {
     let complaint = output.complaint().unwrap_or("the program failed");
     let lowered = complaint.to_lowercase();
 
+    // Things that are true of the video, and will still be true tomorrow.
     const GONE: &[&str] = &[
         "video unavailable",
         "private video",
@@ -731,18 +817,37 @@ fn interpret(output: &Output) -> NetError {
         "this live event has ended",
     ];
 
+    // Things that are true of the *program*, and stop being true when it is
+    // updated. Every one of these has been seen from a `yt-dlp` a few months
+    // behind the service, on videos that play perfectly well.
+    //
+    // "requested format is not available" belongs here rather than above,
+    // which is a correction: it reads like the video offering nothing usable,
+    // and in practice it is far more often the extractor getting no formats
+    // at all back from a client the service no longer accepts. Treating it as
+    // a property of the video meant remembering it for a fortnight, so an
+    // update would not visibly fix anything.
+    const BEHIND: &[&str] = &[
+        "403",
+        "forbidden",
+        "requested format is not available",
+        "the page needs to be reloaded",
+        "sign in to confirm you're not a bot",
+        "failed to extract any player response",
+        "unable to extract",
+        "nsig extraction failed",
+        "please report this issue",
+    ];
+
+    if BEHIND.iter().any(|phrase| lowered.contains(phrase)) {
+        return Trouble::Refused(complaint.to_owned());
+    }
+
     if GONE.iter().any(|phrase| lowered.contains(phrase)) {
-        return NetError::NotFound;
+        return Trouble::Unavailable(complaint.to_owned());
     }
 
-    // The video is there and offers nothing this build can decode, which is
-    // the Opus-only case. A miss rather than a fault: nothing is broken, and
-    // retrying would give the same answer every time.
-    if lowered.contains("requested format is not available") {
-        return NetError::NotFound;
-    }
-
-    NetError::Transport(complaint.to_owned())
+    Trouble::Failed(complaint.to_owned())
 }
 
 /// The host part of a URL, without a scheme, a port or a leading `www.`.
@@ -1015,7 +1120,7 @@ mod tests {
     fn the_log_names_the_machine_that_will_serve_the_audio() {
         let harness = harness(vec![Ok(ran(DUMP))], vec![]);
 
-        harness.client.resolve(&Query::new("dQw4w9WgXcQ"));
+        let _ = harness.client.resolve(&Query::new("dQw4w9WgXcQ"));
 
         let entry = &harness.activity.recent()[0];
         assert_eq!(entry.source, "youtube");
@@ -1027,7 +1132,7 @@ mod tests {
     fn the_format_asked_for_is_aac_and_never_falls_back_to_opus() {
         let harness = harness(vec![Ok(ran(DUMP))], vec![]);
 
-        harness.client.resolve(&Query::new("dQw4w9WgXcQ"));
+        let _ = harness.client.resolve(&Query::new("dQw4w9WgXcQ"));
 
         let args = harness.runner.calls()[0].join(" ");
         assert!(args.contains(FORMAT), "{args}");
@@ -1067,24 +1172,34 @@ mod tests {
         );
         let query = Query::new("dQw4w9WgXcQ");
 
-        assert!(harness.client.resolve(&query).is_none());
-        assert!(harness.client.resolve(&query).is_none());
+        assert!(harness.client.resolve(&query).is_err());
+        assert!(harness.client.resolve(&query).is_err());
 
         assert_eq!(harness.runner.calls().len(), 1, "a miss was not remembered");
         assert_eq!(harness.activity.recent()[1].outcome, Outcome::NotFound);
     }
 
-    /// A video offering only Opus is not a broken player. It is a video this
-    /// build cannot use, and the log should say so once and stop asking.
+    /// This test used to assert the opposite, and asserting it is what let the
+    /// bug ship.
+    ///
+    /// The reasoning was that "requested format is not available" means a
+    /// video offering only Opus — real, but rare. What it means far more often
+    /// is that the extractor asked a client the service no longer accepts and
+    /// got no formats back at all, which is a property of the program and not
+    /// of the video. Filed as a miss it was remembered for a fortnight, so
+    /// updating `yt-dlp` appeared to fix nothing.
+    ///
+    /// The cost of being wrong the other way is one wasted lookup on a genuine
+    /// Opus-only video, which is much the cheaper mistake.
     #[test]
-    fn nothing_playable_on_offer_is_a_miss() {
+    fn nothing_playable_on_offer_blames_the_program_not_the_video() {
         let harness = harness(
             vec![Ok(failed("ERROR: Requested format is not available"))],
             vec![],
         );
 
-        assert!(harness.client.resolve(&Query::new("dQw4w9WgXcQ")).is_none());
-        assert_eq!(harness.activity.recent()[0].outcome, Outcome::NotFound);
+        assert!(harness.client.resolve(&Query::new("dQw4w9WgXcQ")).is_err());
+        assert_eq!(harness.activity.recent()[0].outcome, Outcome::Failed);
     }
 
     /// One bad afternoon should not become a fortnight of a link refusing to
@@ -1100,8 +1215,8 @@ mod tests {
         );
         let query = Query::new("dQw4w9WgXcQ");
 
-        assert!(harness.client.resolve(&query).is_none());
-        assert!(harness.client.resolve(&query).is_some(), "it gave up");
+        assert!(harness.client.resolve(&query).is_err());
+        assert!(harness.client.resolve(&query).is_ok(), "it gave up");
 
         assert_eq!(harness.runner.calls().len(), 2);
         assert_eq!(harness.activity.recent()[1].outcome, Outcome::Failed);
@@ -1111,7 +1226,7 @@ mod tests {
     fn output_that_is_not_json_is_a_failure_rather_than_a_panic() {
         let harness = harness(vec![Ok(ran("this is not json"))], vec![]);
 
-        assert!(harness.client.resolve(&Query::new("dQw4w9WgXcQ")).is_none());
+        assert!(harness.client.resolve(&Query::new("dQw4w9WgXcQ")).is_err());
         assert_eq!(harness.activity.recent()[0].outcome, Outcome::Failed);
     }
 
@@ -1119,10 +1234,93 @@ mod tests {
     fn a_link_naming_no_video_runs_nothing_and_logs_nothing() {
         let harness = harness(vec![], vec![]);
 
-        assert!(harness.client.resolve(&Query::new("not a link")).is_none());
+        assert!(harness.client.resolve(&Query::new("not a link")).is_err());
 
         assert!(harness.runner.calls().is_empty());
         assert!(harness.activity.recent().is_empty());
+    }
+
+    /// The failure a user actually hits, and the reason this distinction
+    /// exists. YouTube answers and refuses; the video is fine; the fix is to
+    /// update the program. Remembering it as a missing video would mean the
+    /// update fixed nothing for a fortnight.
+    #[test]
+    fn a_refusal_is_not_remembered_and_says_what_to_do() {
+        let harness = harness(
+            vec![
+                Ok(failed(
+                    "ERROR: unable to download video data: HTTP Error 403: Forbidden",
+                )),
+                Ok(ran(DUMP)),
+            ],
+            vec![],
+        );
+        let query = Query::new("dQw4w9WgXcQ");
+
+        let trouble = harness.client.resolve(&query).expect_err("a refusal");
+        assert!(matches!(trouble, Trouble::Refused(_)));
+        assert!(
+            trouble.message().contains("out of date"),
+            "{}",
+            trouble.message()
+        );
+
+        // Asked again rather than remembered, so an update takes effect at once.
+        assert!(
+            harness.client.resolve(&query).is_ok(),
+            "the refusal was remembered"
+        );
+        assert_eq!(harness.runner.calls().len(), 2);
+    }
+
+    /// This one used to be filed as a property of the video, which meant an
+    /// out-of-date extractor getting no formats back was remembered for a
+    /// fortnight as "this video has nothing playable".
+    #[test]
+    fn no_formats_offered_reads_as_the_program_being_behind() {
+        let harness = harness(
+            vec![Ok(failed("ERROR: Requested format is not available"))],
+            vec![],
+        );
+
+        let trouble = harness
+            .client
+            .resolve(&Query::new("dQw4w9WgXcQ"))
+            .expect_err("a refusal");
+
+        assert!(matches!(trouble, Trouble::Refused(_)), "{trouble:?}");
+    }
+
+    #[test]
+    fn a_video_that_is_gone_says_so_rather_than_blaming_the_program() {
+        let harness = harness(
+            vec![Ok(failed("ERROR: [youtube] x: Private video"))],
+            vec![],
+        );
+
+        let trouble = harness
+            .client
+            .resolve(&Query::new("dQw4w9WgXcQ"))
+            .expect_err("unavailable");
+
+        assert!(matches!(trouble, Trouble::Unavailable(_)), "{trouble:?}");
+        assert!(trouble.message().contains("not available"));
+        assert!(!trouble.message().contains("out of date"));
+    }
+
+    /// The log's detail column gets what the program actually said, however
+    /// the message on screen is worded.
+    #[test]
+    fn the_log_keeps_the_programs_own_words() {
+        let harness = harness(vec![Ok(failed("ERROR: HTTP Error 403: Forbidden"))], vec![]);
+
+        let _ = harness.client.resolve(&Query::new("dQw4w9WgXcQ"));
+
+        let detail = harness.activity.recent()[0]
+            .detail
+            .clone()
+            .expect("a detail");
+        assert!(detail.contains("403"), "{detail}");
     }
 
     // -- fetching -----------------------------------------------------------
@@ -1187,7 +1385,7 @@ mod tests {
     fn a_download_that_leaves_nothing_behind_is_a_failure() {
         let harness = harness(vec![Ok(ran(""))], vec![]);
 
-        assert!(harness.client.fetch_audio(&resolved()).is_none());
+        assert!(harness.client.fetch_audio(&resolved()).is_err());
 
         let entry = &harness.activity.recent()[0];
         assert_eq!(entry.outcome, Outcome::Failed);
@@ -1198,7 +1396,7 @@ mod tests {
     fn the_download_is_capped_and_never_touches_an_account() {
         let harness = harness(vec![Ok(ran(""))], vec![]);
 
-        harness.client.fetch_audio(&resolved());
+        let _ = harness.client.fetch_audio(&resolved());
 
         let args = harness.runner.calls()[0].join(" ");
         assert!(args.contains("--max-filesize"), "{args}");
@@ -1215,7 +1413,7 @@ mod tests {
     fn segments_are_not_cut_out_of_the_file() {
         let harness = harness(vec![Ok(ran(""))], vec![]);
 
-        harness.client.fetch_audio(&resolved());
+        let _ = harness.client.fetch_audio(&resolved());
 
         let args = harness.runner.calls()[0].join(" ");
         assert!(!args.contains("--sponsorblock"), "{args}");

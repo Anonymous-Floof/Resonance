@@ -376,6 +376,20 @@ music.
 > your behalf would be a much larger thing to trust. Settings shows which copy
 > it found and what version it is.
 
+> [!IMPORTANT]
+> **Keep yt-dlp up to date. This is the thing most likely to go wrong.**
+>
+> YouTube changes what it demands of a program that downloads from it every few
+> weeks, and an out-of-date yt-dlp fails in a way that looks like a broken
+> player rather than an old tool: the link resolves, the right title and cover
+> appear, and only the audio is refused — usually with `HTTP Error 403` or
+> `Requested format is not available` in the activity log.
+>
+> Resonance names the likely cause rather than leaving you to guess, and
+> Settings says so plainly when the copy it found is more than about three
+> months old. If links stop playing, update yt-dlp before looking anywhere
+> else.
+
 | | |
 |---|---|
 | **Where it goes** | `youtube.com`, and `i.ytimg.com` for the cover |
@@ -607,7 +621,7 @@ scripted fake. **No test in the workspace opens a socket.**
 ## Tests
 
 ```bash
-cargo test --workspace          # 962 tests
+cargo test --workspace          # 971 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```
