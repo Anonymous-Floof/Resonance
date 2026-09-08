@@ -553,6 +553,22 @@ pub struct Privacy {
     /// cookie or credential is ever passed to the program.
     pub online_youtube: bool,
 
+    /// Skip sponsor reads, intros and anything else that is not the song.
+    ///
+    /// Off by default, and does nothing unless [`Self::online_youtube`] is on.
+    ///
+    /// Adds one service: SponsorBlock, a community record of which parts of a
+    /// video are not the music. It is asked in a way that does not tell it
+    /// what is playing — the first four characters of a hash of the video
+    /// identifier go out, and it answers with the segments for every video
+    /// sharing that prefix, one in 65,536, which are then filtered on this
+    /// machine. The identifier itself never leaves.
+    ///
+    /// Segments are skipped as the track plays. **The audio is not cut.**
+    /// Switching this off gives the whole track back, because nothing was
+    /// thrown away in the first place.
+    pub online_youtube_sponsorblock: bool,
+
     /// Where `yt-dlp` is, when it is not on `PATH`.
     ///
     /// `None` means look on `PATH`, which is right on most machines. A path
@@ -577,6 +593,8 @@ impl Default for Privacy {
             // And again, and this one hardest of all: it is the only feature
             // here whose requests Resonance does not make itself.
             online_youtube: false,
+            // Off, and one further step removed: it needs the one above.
+            online_youtube_sponsorblock: false,
             // Look on PATH. Nothing is bundled and nothing is downloaded.
             yt_dlp_path: None,
         }

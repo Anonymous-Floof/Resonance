@@ -30,6 +30,7 @@ Everything the offline constraint made impossible:
 - **Lyrics fetching** — done, via LRCLIB
 - **Artwork fetching** — done, via MusicBrainz and the Cover Art Archive
 - **Playing a YouTube link** — done, via `yt-dlp`
+- **Skipping the parts that are not the song** — done, via SponsorBlock
 - Artist and genre metadata, MusicBrainz-style
 - Whatever else you have planned
 
@@ -199,6 +200,25 @@ trade anyway.
 file it did not find while walking the watched folders, so one pointing into
 the cache would not survive the next scan — and a cache file is not something
 the user chose to index. `Player` carries the display facts instead.
+
+## The one that got the shape right
+
+SponsorBlock, immediately afterwards, and worth reading as the counterexample.
+
+It has an endpoint that takes a video identifier, and another that takes the
+first four characters of a SHA-256 of it and answers for every video sharing
+them. The second is the one used, and the filtering happens here.
+
+That is not politeness, it is the difference between a service that could
+build a listening history and one that cannot. It also made the opt-in
+sentence trivial to write — *"the first four characters of a hash of the video
+identifier, not the identifier"* — and a `sends` line that is easy to write is
+usually the sign of a design worth keeping. When the next service offers two
+endpoints, take the one that makes the sentence easy.
+
+`ring` came with it, and cost nothing: `rustls` already pulls it in under
+`ureq`, so declaring it directly added a line to `Cargo.toml` and not a single
+crate to the tree. Worth checking for before hand-rolling anything.
 
 ## Working across the two
 

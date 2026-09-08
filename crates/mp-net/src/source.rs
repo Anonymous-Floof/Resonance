@@ -204,6 +204,30 @@ pub const YOUTUBE_THUMBNAIL: Source = Source {
     min_interval: Duration::from_millis(500),
 };
 
+/// The community record of which parts of a video are not the song.
+///
+/// The only source here that is asked a question it cannot fully answer, on
+/// purpose. It is not sent the video: it is sent the first four characters of
+/// a hash of the video's identifier, and it replies with the segments for
+/// every video sharing that prefix — one in 65,536 — which are filtered on
+/// this machine.
+///
+/// That shape is the reason this is here at all. A lookup that named the video
+/// would tell somebody else what is being listened to, one track at a time,
+/// and being a well-meaning somebody else does not make that a thing to do
+/// quietly. See [`crate::sponsorblock`].
+pub const SPONSORBLOCK: Source = Source {
+    id: "sponsorblock",
+    label: "SponsorBlock",
+    host: "sponsor.ajay.app",
+    also_contacts: None,
+    via: None,
+    purpose: "Which parts of a video are sponsor reads, intros, or otherwise not the music.",
+    sends: "The first four characters of a hash of the video identifier - not the identifier, and nothing from your files.",
+    terms: "https://sponsor.ajay.app/",
+    min_interval: Duration::from_millis(500),
+};
+
 /// Every source this build can reach.
 pub const SOURCES: &[Source] = &[
     LRCLIB,
@@ -211,6 +235,7 @@ pub const SOURCES: &[Source] = &[
     COVER_ART_ARCHIVE,
     YOUTUBE,
     YOUTUBE_THUMBNAIL,
+    SPONSORBLOCK,
 ];
 
 /// Look up a source by its [`id`](Source::id).

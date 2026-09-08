@@ -27,6 +27,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use mp_core::library::art::ArtCache;
 use mp_core::library::names;
 use mp_net::Activity;
+use mp_net::sponsorblock;
 use mp_net::tool::YtDlp;
 use mp_net::youtube::{Client, Query, Resolved};
 
@@ -124,7 +125,7 @@ impl Stage {
 }
 
 /// What came back.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Answer {
     /// A file on disk, ready to play, and what is known about it.
     Ready {
@@ -135,9 +136,19 @@ pub enum Answer {
     Nothing { why: String },
 }
 
+/// One link, and what the user asked for while it was pasted.
+///
+/// The preference travels with the job rather than being read on the worker,
+/// so a link already in flight finishes under the setting it was sent with.
+#[derive(Debug, Clone)]
+struct Job {
+    query: Query,
+    skip_segments: bool,
+}
+
 /// A worker thread that turns links into files.
 pub struct YoutubeJob {
-    jobs: Sender<Query>,
+    jobs: Sender<Job>,
     answers: Receiver<Answer>,
     stage: Arc<AtomicU8>,
     /// Set while something is in flight, so a second paste does not queue up
@@ -167,7 +178,7 @@ impl YoutubeJob {
         activity: Arc<Activity>,
         ctx: egui::Context,
     ) -> Option<Self> {
-        let (jobs, incoming) = std::sync::mpsc::channel::<Query>();
+        let (jobs, incoming) = std::sync::mpsc::channel::<Job>();
         let (outgoing, answers) = std::sync::mpsc::channel::<Answer>();
 
         let stage = Arc::new(AtomicU8::new(Stage::Idle.code()));
@@ -179,13 +190,27 @@ impl YoutubeJob {
             .spawn(move || {
                 // Built on this thread: it owns the transport and the runner,
                 // and nothing on the UI side should be able to reach either.
-                let client = Client::new(Box::new(tool), cache_root, audio_dir, activity);
+                let client = Client::new(
+                    Box::new(tool),
+                    cache_root.clone(),
+                    audio_dir,
+                    Arc::clone(&activity),
+                );
+                let segments = sponsorblock::Client::new(cache_root, activity);
                 let art = ArtCache::new(art_root);
 
                 // Ends when the sender is dropped, which is when the app quits
                 // or the setting is switched off.
-                while let Ok(query) = incoming.recv() {
-                    let answer = run(&client, &art, &sweep_dir, &query, &worker_stage, &ctx);
+                while let Ok(job) = incoming.recv() {
+                    let answer = run(
+                        &client,
+                        &segments,
+                        &art,
+                        &sweep_dir,
+                        &job,
+                        &worker_stage,
+                        &ctx,
+                    );
 
                     worker_stage.store(Stage::Idle.code(), Ordering::Relaxed);
 
@@ -238,7 +263,7 @@ impl YoutubeJob {
     /// the text does not name a video. A link that names nothing is refused
     /// here rather than sent, so nothing unrecognised is ever handed to the
     /// program.
-    pub fn want(&mut self, link: &str) -> bool {
+    pub fn want(&mut self, link: &str, skip_segments: bool) -> bool {
         if self.busy {
             return false;
         }
@@ -248,7 +273,12 @@ impl YoutubeJob {
             return false;
         }
 
-        if self.jobs.send(query).is_err() {
+        let job = Job {
+            query,
+            skip_segments,
+        };
+
+        if self.jobs.send(job).is_err() {
             return false;
         }
 
@@ -285,18 +315,20 @@ fn working_label(stage: Stage) -> &'static str {
 }
 
 /// One link, start to finish.
+#[allow(clippy::too_many_arguments)]
 fn run(
     client: &Client,
+    segments: &sponsorblock::Client,
     art: &ArtCache,
     audio_dir: &Path,
-    query: &Query,
+    job: &Job,
     stage: &AtomicU8,
     ctx: &egui::Context,
 ) -> Answer {
     stage.store(Stage::Resolving.code(), Ordering::Relaxed);
     ctx.request_repaint();
 
-    let Some(resolved) = client.resolve(query) else {
+    let Some(resolved) = client.resolve(&job.query) else {
         return Answer::Nothing {
             why: "Could not read that link. It may be private, removed, or offer no audio this build can play - the activity log says which.".to_owned(),
         };
@@ -327,13 +359,26 @@ fn run(
             }
         });
 
+    // Asked for last, and never a reason to fail: a track with nothing
+    // skipped still plays. Only asked at all when the user said so.
+    let skips = if job.skip_segments {
+        segments
+            .fetch(&sponsorblock::Query::new(&resolved.video_id))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|segment| (segment.start, segment.end))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // After the fetch rather than before, so the file just downloaded is
     // already on disk and counted.
     sweep(audio_dir, CACHE_BUDGET, &audio.path);
 
     Answer::Ready {
         path: audio.path,
-        facts: Box::new(facts_from(&resolved, art_id)),
+        facts: Box::new(facts_from(&resolved, art_id, skips)),
     }
 }
 
@@ -345,7 +390,7 @@ fn run(
 /// a video title is exactly that string by another route.
 ///
 /// Only what is shown is cleaned. Nothing here is written anywhere.
-fn facts_from(resolved: &Resolved, art_id: Option<String>) -> StreamFacts {
+fn facts_from(resolved: &Resolved, art_id: Option<String>, skips: Vec<(f64, f64)>) -> StreamFacts {
     let artist = names::strip_channel_suffix(&resolved.artist);
     let artist = if artist.trim().is_empty() {
         resolved.artist.clone()
@@ -368,6 +413,7 @@ fn facts_from(resolved: &Resolved, art_id: Option<String>) -> StreamFacts {
         album: resolved.album.clone(),
         art_id,
         duration: resolved.duration,
+        skips,
     }
 }
 
@@ -438,6 +484,12 @@ mod tests {
     use super::*;
     use std::time::{Duration, SystemTime};
 
+    /// The cleaning is what these tests are about, so they keep the shape
+    /// they had before segments were carried alongside it.
+    fn facts_from_test(resolved: &Resolved, art_id: Option<String>) -> StreamFacts {
+        facts_from(resolved, art_id, Vec::new())
+    }
+
     fn resolved(title: &str, artist: &str) -> Resolved {
         Resolved {
             video_id: "dQw4w9WgXcQ".into(),
@@ -453,16 +505,16 @@ mod tests {
 
     #[test]
     fn a_channel_name_becomes_an_artist() {
-        let facts = facts_from(&resolved("Some Song", "Nightgrove - Topic"), None);
+        let facts = facts_from_test(&resolved("Some Song", "Nightgrove - Topic"), None);
         assert_eq!(facts.artist, "Nightgrove");
 
-        let facts = facts_from(&resolved("Some Song", "HalcyonVEVO"), None);
+        let facts = facts_from_test(&resolved("Some Song", "HalcyonVEVO"), None);
         assert_eq!(facts.artist, "Halcyon");
     }
 
     #[test]
     fn video_decoration_comes_off_the_title() {
-        let facts = facts_from(
+        let facts = facts_from_test(
             &resolved("Die in a Fire (Official Video)", "The Living Tombstone"),
             None,
         );
@@ -474,7 +526,7 @@ mod tests {
     /// the artist on the next line anyway.
     #[test]
     fn a_title_does_not_repeat_its_own_artist() {
-        let facts = facts_from(
+        let facts = facts_from_test(
             &resolved(
                 "Rick Astley - Never Gonna Give You Up (Official Video)",
                 "Rick Astley",
@@ -492,7 +544,7 @@ mod tests {
     fn an_aside_that_names_a_different_recording_survives() {
         for kept in ["(Live)", "(Acoustic)", "[Remix]", "(feat. Someone)"] {
             let title = format!("Some Song {kept}");
-            let facts = facts_from(&resolved(&title, "A Band"), None);
+            let facts = facts_from_test(&resolved(&title, "A Band"), None);
 
             assert_eq!(facts.title, title, "{kept} should have been kept");
         }
@@ -502,13 +554,13 @@ mod tests {
     /// decoration keeps what it had.
     #[test]
     fn a_title_that_is_all_decoration_is_left_alone() {
-        let facts = facts_from(&resolved("(Official Video)", "A Band"), None);
+        let facts = facts_from_test(&resolved("(Official Video)", "A Band"), None);
         assert_eq!(facts.title, "(Official Video)");
     }
 
     #[test]
     fn an_artist_that_is_all_suffix_is_left_alone() {
-        let facts = facts_from(&resolved("Some Song", "VEVO"), None);
+        let facts = facts_from_test(&resolved("Some Song", "VEVO"), None);
         assert!(!facts.artist.trim().is_empty());
     }
 

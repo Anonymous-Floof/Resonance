@@ -4,8 +4,9 @@
 > to opt out of. This build can reach the network, and everything it can reach
 > is listed below and switched off until you turn it on.
 >
-> Right now that is three things: fetching lyrics for tracks that have none,
-> cover art for albums that have none, and playing a YouTube link. See
+> Right now that is four things: fetching lyrics for tracks that have none,
+> cover art for albums that have none, playing a YouTube link, and skipping
+> the parts of one that are not the song. See
 > [Online lookups](#online-lookups),
 > and [BRANCH.md](BRANCH.md) for why the two builds exist.
 
@@ -38,6 +39,7 @@ with the operating system.
   - [Editing tags safely](#editing-tags-safely)
   - [Online lookups](#online-lookups)
   - [Playing from a link](#playing-from-a-link)
+  - [Skipping what is not the song](#skipping-what-is-not-the-song)
   - [Format support](#format-support)
 - [For developers](#for-developers) — build it and change it
   - [Build and run](#build-and-run)
@@ -109,10 +111,10 @@ with the operating system.
 - **Never modifies your audio files.** Tag editing is off by default, and every
   edit it does make is reversible from a history panel.
 - **Nothing leaves your machine unless you switch it on.** Your library and
-  suggestions are built locally and always have been. Three features reach
-  out — [lyrics, cover art and playing a link](#online-lookups) — all are off
-  by default, and Settings names every service and says exactly what it would
-  send.
+  suggestions are built locally and always have been. Four features reach out
+  — [lyrics, cover art, playing a link, and skipping the parts of one that are
+  not the song](#online-lookups) — all are off by default, and Settings names
+  every service and says exactly what it would send.
 - **Never writes to your music files.** A fetched cover goes into the app's own
   cache, not into your tags and not into your folders.
 - **Every request is written down** in a plain text file you can read, whether
@@ -398,6 +400,38 @@ instead, which is a little lower quality and is the one that actually plays. A
 video offering nothing but Opus is reported as unplayable rather than
 downloaded and then failed on.
 
+### Skipping what is not the song
+
+**Settings → Online → Skip what is not the song.** Off by default, and does
+nothing unless playing from a link is on.
+
+Sponsor reads, intros, outros and the talking before the music are skipped as
+the track plays, using [SponsorBlock](https://sponsor.ajay.app/) — a database
+of those sections built by the people who use it. For a music video the useful
+one is `music_offtopic`: the part that is not the music.
+
+**It is asked in a way that does not tell it what you are playing.** Not the
+video identifier — the **first four characters of a hash of it**. The service
+answers with the segments for every video sharing those four characters, about
+one in 65,000, and which one is yours is worked out on your machine.
+
+| | |
+|---|---|
+| **Where it goes** | `sponsor.ajay.app` |
+| **What is sent** | Four characters of a hash. Not the video, not a link, nothing from your files, and no account |
+| **When** | Once per video, then remembered |
+| **If it fails** | Nothing is skipped, and the track plays whole |
+
+**Nothing is cut.** The audio is skipped past as it plays, so turning the
+setting off gives you the whole track back — there is no re-encoding and
+nothing is thrown away. yt-dlp can cut these sections out of the file instead;
+Resonance deliberately does not use that, because it needs ffmpeg and cannot
+be undone.
+
+The skip is checked as the window draws, so up to about 50 ms of a sponsor read
+can be heard before it jumps. A section that runs to the very end of the track
+is left alone rather than ending it early.
+
 ### Checking what it actually did
 
 Every lookup is written to a plain text file, one line each, including the ones
@@ -573,7 +607,7 @@ scripted fake. **No test in the workspace opens a socket.**
 ## Tests
 
 ```bash
-cargo test --workspace          # 942 tests
+cargo test --workspace          # 962 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```
@@ -667,6 +701,15 @@ The unit tests answer from a scripted fake, which proves the parsing and proves
 nothing about whether yt-dlp still reports the fields this expects — and that
 is the part most likely to break, because the service changes and yt-dlp
 follows it.
+
+**Nothing is being skipped**
+
+```bash
+cargo run -p mp-net --example sponsorblock_probe -- dQw4w9WgXcQ
+```
+Asks SponsorBlock about one video and prints the URL it used, which is the
+point: the video identifier is not in it. Also prints how many videos shared
+the prefix and which segments were yours. **This one uses the network.**
 
 **Checking for regressions**
 

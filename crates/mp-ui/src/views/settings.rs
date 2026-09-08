@@ -67,6 +67,8 @@ pub struct Network<'a> {
     pub youtube_sources: [&'static mp_net::Source; 2],
     /// Whether the program that fetches a link is installed, and which copy.
     pub yt_dlp: Option<&'a crate::youtube_job::ToolStatus>,
+    /// Where the list of what to skip comes from.
+    pub sponsorblock: &'static mp_net::Source,
     /// Entries in the log, including the ones that never left the machine.
     pub entries: usize,
     /// How many of those were actual requests.
@@ -1393,6 +1395,47 @@ fn online_section(
                 "The audio is fetched into this app's cache and played from there. Nothing is added to your library, nothing is written to your music folders, and no account or cookie is ever involved.",
             );
 
+            ui.add_space(m.space(1.0));
+
+            row(
+                ui,
+                theme,
+                "Skip what is not the song",
+                "Sponsor reads, intros and other sections, skipped as the track plays",
+                |ui| {
+                    ui.checkbox(&mut config.privacy.online_youtube_sponsorblock, "")
+                        .changed()
+                },
+            )
+            .apply(out);
+
+            if config.privacy.online_youtube_sponsorblock {
+                let source = network.sponsorblock;
+
+                ui.add_space(m.space(1.0));
+                note(
+                    ui,
+                    theme,
+                    &format!(
+                        "{} — {} Sends: {}",
+                        source.label, source.purpose, source.sends
+                    ),
+                );
+
+                // The unusual thing about this one is worth spelling out,
+                // because it is the reason it can be recommended at all.
+                note(
+                    ui,
+                    theme,
+                    "That prefix matches roughly one video in 65,000, and the answer covers all of them. Which one you are playing is worked out on this machine, so the service is never told.",
+                );
+                note(
+                    ui,
+                    theme,
+                    "Nothing is cut. The audio is skipped past as it plays, so turning this off gives the whole track back.",
+                );
+            }
+
             if let Some(status) = network.yt_dlp {
                 ui.add_space(m.space(1.0));
                 note(ui, theme, &status.summary());
@@ -1733,6 +1776,7 @@ mod tests {
             artwork: None,
             youtube_sources: [&mp_net::source::YOUTUBE, &mp_net::source::YOUTUBE_THUMBNAIL],
             yt_dlp: None,
+            sponsorblock: &mp_net::source::SPONSORBLOCK,
             entries,
             requests,
             log_path: None,

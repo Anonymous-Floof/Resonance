@@ -113,7 +113,9 @@ impl NowPlaying {
 /// [`NowPlaying::from_path`] would show a video id and "Unknown Artist". These
 /// are the facts the fetcher already knew, kept until the track actually
 /// starts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Not `Eq`: the skip boundaries are seconds, and seconds are floats.
+#[derive(Debug, Clone, PartialEq)]
 pub struct StreamFacts {
     pub title: String,
     pub artist: String,
@@ -121,6 +123,12 @@ pub struct StreamFacts {
     /// A cover already stored in the art cache, if one was found.
     pub art_id: Option<String>,
     pub duration: Option<Duration>,
+    /// Stretches of this track that are not the song, in seconds, sorted and
+    /// non-overlapping.
+    ///
+    /// Empty unless the user asked for them, so nothing downstream needs to
+    /// consult a setting: there is simply nothing to skip.
+    pub skips: Vec<(f64, f64)>,
 }
 
 /// How much of a track has to be heard before it counts as a *play*.
@@ -491,6 +499,59 @@ impl Player {
     pub fn play_stream(&mut self, path: PathBuf, facts: StreamFacts) {
         self.stream_facts.insert(path.clone(), facts);
         self.play(vec![path], 0);
+    }
+
+    /// Skip past anything in the current track that is not the song.
+    ///
+    /// Driven from the frame rather than scheduled inside the engine, which
+    /// keeps `mp-audio` entirely out of this. The cost is honest and small:
+    /// the window repaints every 50 ms while playing, so up to about that much
+    /// of a sponsor read can be heard before the skip.
+    ///
+    /// Does nothing at all for an ordinary library track — only a track that
+    /// arrived with segments attached has anything to skip.
+    pub fn skip_sponsored(&self) {
+        // Not while the user is holding the seek bar. Fighting them for
+        // control of the position is worse than a few seconds of an advert.
+        if self.scrubbing.is_some() || !self.is_playing() {
+            return;
+        }
+
+        let Some(now) = &self.now_playing else {
+            return;
+        };
+
+        let Some(facts) = self.stream_facts.get(&now.path) else {
+            return;
+        };
+
+        if facts.skips.is_empty() {
+            return;
+        }
+
+        let Some(total) = self.duration_secs() else {
+            return;
+        };
+
+        if total <= 0.0 {
+            return;
+        }
+
+        let position = self.position_secs();
+
+        for &(start, end) in &facts.skips {
+            // A segment running to the end of the track is left alone. Seeking
+            // there would end the track, and an outro that plays out is a much
+            // smaller surprise than a song that stops before it is over.
+            if end >= total {
+                continue;
+            }
+
+            if position >= start && position < end {
+                self.seek_fraction((end / total) as f32);
+                return;
+            }
+        }
     }
 
     pub fn seek_fraction(&self, fraction: f32) {

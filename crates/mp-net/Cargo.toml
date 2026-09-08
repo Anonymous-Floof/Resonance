@@ -25,6 +25,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 ureq = { version = "3.4", default-features = false, features = ["rustls"] }
+# Adds nothing to the tree: rustls already pulls this in under ureq, so this
+# only makes the dependency direct and honest. Used for exactly one thing --
+# the SHA-256 prefix that lets a SponsorBlock lookup happen without naming the
+# video being played. See `sponsorblock.rs`.
+ring = "0.17"
 
 [dev-dependencies]
 tempfile.workspace = true

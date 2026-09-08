@@ -2249,13 +2249,17 @@ impl ResonanceApp {
 
         if outcome.play {
             let link = self.open_url.text().to_owned();
+            // Read before the worker is borrowed, and carried with the job so
+            // a link already in flight finishes under the setting it was sent
+            // with rather than one changed halfway through.
+            let skip_segments = self.config.privacy.online_youtube_sponsorblock;
             // The two ways this goes nowhere are different problems with
             // different fixes, and naming the wrong one costs an afternoon. A
             // busy worker is not among them: the button and the Enter key are
             // both held down while one is running.
             let problem = match self.youtube_job.as_mut() {
                 Some(job) => {
-                    if job.want(&link) {
+                    if job.want(&link, skip_segments) {
                         None
                     } else {
                         Some(
@@ -3104,6 +3108,7 @@ impl ResonanceApp {
                     log_path: log_path.as_deref(),
                     youtube_sources: [&mp_net::source::YOUTUBE, &mp_net::source::YOUTUBE_THUMBNAIL],
                     yt_dlp: self.yt_dlp.as_ref(),
+                    sponsorblock: &mp_net::source::SPONSORBLOCK,
                 },
             },
         );
@@ -3414,6 +3419,13 @@ impl eframe::App for ResonanceApp {
             &mut self.library,
             self.config.privacy.track_play_history,
         );
+
+        // Checked from the frame, so switching the setting off takes effect on
+        // the track already playing rather than the next one. Costs nothing on
+        // an ordinary library track: there is nothing to skip.
+        if self.config.privacy.online_youtube_sponsorblock {
+            self.player.skip_sponsored();
+        }
         self.follow_artwork(ui.ctx(), dt);
         self.playlists.update(self.library.library());
         self.top_up_radio();

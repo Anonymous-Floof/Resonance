@@ -1682,6 +1682,7 @@ name = "mp-net"
 version = "0.3.0-networked"
 dependencies = [
  "anyhow",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",

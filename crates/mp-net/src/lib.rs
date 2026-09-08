@@ -32,6 +32,9 @@
 //! - [`lyrics`] — the first fetcher: LRCLIB, for words the audio file does not
 //!   carry.
 //! - [`artwork`] — covers, by way of MusicBrainz and the Cover Art Archive.
+//! - [`youtube`] — a link, turned into a file that can be played.
+//! - [`sponsorblock`] — which parts of a video are not the song, asked for
+//!   without saying which video.
 //! - [`tool`] — the one thing here that is not a request: running an external
 //!   program, for the work no GET can do. What it costs, and why it is
 //!   declared rather than hidden, is written up there.
@@ -66,6 +69,7 @@ pub mod http;
 pub mod lyrics;
 pub mod rate;
 pub mod source;
+pub mod sponsorblock;
 pub mod timestamp;
 pub mod tool;
 pub mod youtube;

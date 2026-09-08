@@ -105,7 +105,7 @@ this.
 ## Checks before any commit
 
 ```bash
-cargo test --workspace          # 942 tests
+cargo test --workspace          # 962 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all
 ```

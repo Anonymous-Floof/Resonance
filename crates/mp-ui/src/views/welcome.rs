@@ -45,7 +45,7 @@ const PROMISES: &[(Icon, &str, &str)] = &[
     (
         Icon::Search,
         "Offline until you say otherwise",
-        "Your library, suggestions and statistics are all built on this machine, and nothing is ever uploaded. Three things can reach out - lyrics, cover art, and playing a link - every one of them is switched off, and Settings names the service and says exactly what it would send before you turn it on.",
+        "Your library, suggestions and statistics are all built on this machine, and nothing is ever uploaded. Four things can reach out - lyrics, cover art, playing a link, and skipping the parts of one that are not the song - every one of them is switched off, and Settings names the service and says exactly what it would send before you turn it on.",
     ),
 ];
 
@@ -202,10 +202,10 @@ mod tests {
         // your computer. It was true when written, stopped being true when
         // artwork landed, and nobody noticed. So the count is pinned too: a
         // fourth feature that reaches out has to come back here and say so.
-        for reaches_out in ["lyrics", "cover art", "playing a link"] {
+        for reaches_out in ["lyrics", "cover art", "playing a link", "not the song"] {
             assert!(text.contains(reaches_out), "{reaches_out} is not named");
         }
-        assert!(text.contains("three things can reach out"));
+        assert!(text.contains("four things can reach out"));
         assert!(text.contains("switched off"));
     }
 }
