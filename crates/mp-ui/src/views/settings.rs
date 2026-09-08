@@ -1295,7 +1295,7 @@ fn online_section(
                 // about is precisely what the activity log exists to prevent,
                 // so the redirect is stated before it happens rather than
                 // discovered afterwards in the log.
-                if let Some(elsewhere) = source.redirected_to {
+                if let Some(elsewhere) = source.also_contacts {
                     note(
                         ui,
                         theme,

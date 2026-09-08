@@ -29,7 +29,7 @@
 //!
 //! [`MUSICBRAINZ`] identifies the release; [`COVER_ART_ARCHIVE`] serves the
 //! image. The second answers with a redirect and the file itself arrives from
-//! the Internet Archive, which is why [`Source::redirected_to`] exists and why
+//! the Internet Archive, which is why [`Source::also_contacts`] exists and why
 //! the log records the host that actually answered rather than the one that
 //! was addressed.
 //!

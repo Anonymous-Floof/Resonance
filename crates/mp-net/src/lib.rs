@@ -68,6 +68,7 @@ pub mod rate;
 pub mod source;
 pub mod timestamp;
 pub mod tool;
+pub mod youtube;
 
 pub use activity::{Activity, Entry, LOG_FILE_NAME, Outcome};
 pub use cache::Cache;

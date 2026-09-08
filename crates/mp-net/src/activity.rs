@@ -189,7 +189,7 @@ impl Entry {
     /// Logging the address rather than the responder would leave the file
     /// saying this build talked to a host it never reached, and omitting one
     /// it did — which is the sort of small untruth that makes the whole record
-    /// worthless. The declared [`Source::redirected_to`] says this is expected;
+    /// worthless. The declared [`Source::also_contacts`] says this is expected;
     /// this says where it actually went.
     pub fn with_host(mut self, host: impl Into<String>) -> Self {
         let host = sanitise(host.into());
@@ -581,7 +581,8 @@ mod tests {
         id: "example",
         label: "Example",
         host: "example.org",
-        redirected_to: None,
+        also_contacts: None,
+        via: None,
         purpose: "A test fixture.",
         sends: "Nothing.",
         terms: "https://example.org/terms",

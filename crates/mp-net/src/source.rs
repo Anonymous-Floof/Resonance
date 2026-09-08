@@ -44,15 +44,30 @@ pub struct Source {
     /// complete answer. A service needing two unrelated hosts is two sources.
     pub host: &'static str,
 
-    /// A second host the request is redirected to, when there is one.
+    /// A second host the request reaches, when there is one.
     ///
     /// Cover Art Archive answers with a redirect and the image itself arrives
-    /// from the Internet Archive, so a request addressed to one host is served
-    /// by another. Naming only the first would let the opt-in screen and the
+    /// from the Internet Archive. YouTube hands back a manifest and the audio
+    /// itself arrives from Google's media servers. Different mechanisms, one
+    /// user-visible fact: a request addressed to one host is served by
+    /// another. Naming only the first would let the opt-in screen and the
     /// activity log say this build talks to one host when it talks to two,
     /// which is exactly the kind of quiet inaccuracy this branch exists to
     /// avoid. `None` where the request goes nowhere else.
-    pub redirected_to: Option<&'static str>,
+    pub also_contacts: Option<&'static str>,
+
+    /// The external program that makes this source's requests, when this
+    /// application is not the thing making them.
+    ///
+    /// `yt-dlp` is what resolves a YouTube link and fetches the audio, so
+    /// those requests do not go through [`Transport`](crate::http::Transport)
+    /// and do not appear under `ureq` in `cargo tree`. That is a real gap in
+    /// the claim this crate exists to make, and naming the program is what
+    /// keeps "everything this build can reach" a complete answer rather than a
+    /// true-sounding one: the settings screen prints it, so the user can go and
+    /// look at what they installed. `None` where Resonance makes the request
+    /// itself, which is every source but one.
+    pub via: Option<&'static str>,
 
     /// What the user gets out of it, in a sentence.
     pub purpose: &'static str,
@@ -86,7 +101,8 @@ pub const LRCLIB: Source = Source {
     id: "lrclib",
     label: "LRCLIB",
     host: "lrclib.net",
-    redirected_to: None,
+    also_contacts: None,
+    via: None,
     purpose: "Lyrics, timed to the music where someone has contributed them.",
     sends: "The artist, title and album from the track's own tags, and its length in seconds.",
     terms: "https://lrclib.net/docs",
@@ -110,7 +126,8 @@ pub const MUSICBRAINZ: Source = Source {
     id: "musicbrainz",
     label: "MusicBrainz",
     host: "musicbrainz.org",
-    redirected_to: None,
+    also_contacts: None,
+    via: None,
     purpose: "Identifies which release an album is, so its cover can be found.",
     sends: "The album title and artist name from the track's own tags.",
     terms: "https://musicbrainz.org/doc/About",
@@ -128,15 +145,73 @@ pub const COVER_ART_ARCHIVE: Source = Source {
     id: "coverartarchive",
     label: "Cover Art Archive",
     host: "coverartarchive.org",
-    redirected_to: Some("archive.org"),
+    also_contacts: Some("archive.org"),
+    via: None,
     purpose: "The cover image for a release that has one.",
     sends: "A MusicBrainz release identifier. Nothing from your files.",
     terms: "https://coverartarchive.org",
     min_interval: Duration::from_millis(500),
 };
 
+/// Where a link becomes something playable.
+///
+/// The one source here whose requests this application does not make. YouTube
+/// publishes no stable way to turn a link into an audio stream, so `yt-dlp`
+/// does it instead — see [`crate::tool`] for what that costs and why it is
+/// declared rather than hidden.
+///
+/// Two things about this are worth knowing before reading the fetcher.
+///
+/// The audio is fetched to this machine and then played, rather than streamed.
+/// That is not a shortcut: it means a track is an ordinary seekable file by the
+/// time the engine sees it, so nothing in the decoder, the queue, the seek bar
+/// or the crossfade has to learn about the network.
+///
+/// And the stream asked for is AAC, not the Opus one YouTube would rather
+/// give. This build ships no Opus decoder — that needs libopus, a C dependency
+/// the project has refused — so the better-sounding stream is the one that
+/// cannot be played. See [`crate::youtube::FORMAT`].
+pub const YOUTUBE: Source = Source {
+    id: "youtube",
+    label: "YouTube",
+    host: "youtube.com",
+    also_contacts: Some("googlevideo.com"),
+    via: Some("yt-dlp"),
+    purpose: "Turns a link into audio this build can play.",
+    sends: "The link you gave it. No account, no identifier, and nothing from your library, your tags or your files.",
+    terms: "https://www.youtube.com/t/terms",
+    // No published figure to take this from, unlike MusicBrainz. Chosen rather
+    // than derived: resolving is a heavy request, and a link arrives when
+    // somebody pastes one, so this floor is a guard against a stuck retry
+    // rather than a throttle anybody will notice.
+    min_interval: Duration::from_millis(1_500),
+};
+
+/// The picture that goes with a video.
+///
+/// Its own source rather than part of [`YOUTUBE`]: a different host, fetched by
+/// this application rather than by `yt-dlp`, and worth being able to tell apart
+/// in the log from the request that found the audio.
+pub const YOUTUBE_THUMBNAIL: Source = Source {
+    id: "youtube-thumbnail",
+    label: "YouTube thumbnails",
+    host: "i.ytimg.com",
+    also_contacts: None,
+    via: None,
+    purpose: "Cover art for a track played from a link.",
+    sends: "A video identifier that came back from the first request. Nothing from your files.",
+    terms: "https://www.youtube.com/t/terms",
+    min_interval: Duration::from_millis(500),
+};
+
 /// Every source this build can reach.
-pub const SOURCES: &[Source] = &[LRCLIB, MUSICBRAINZ, COVER_ART_ARCHIVE];
+pub const SOURCES: &[Source] = &[
+    LRCLIB,
+    MUSICBRAINZ,
+    COVER_ART_ARCHIVE,
+    YOUTUBE,
+    YOUTUBE_THUMBNAIL,
+];
 
 /// Look up a source by its [`id`](Source::id).
 ///
@@ -156,7 +231,8 @@ mod tests {
         id: "example",
         label: "Example",
         host: "example.org",
-        redirected_to: None,
+        also_contacts: None,
+        via: None,
         purpose: "Nothing at all; this source is a test fixture.",
         sends: "Nothing, because no request is ever made to it.",
         terms: "https://example.org/terms",
@@ -192,7 +268,7 @@ mod tests {
     #[test]
     fn a_host_is_a_bare_host() {
         for source in SOURCES.iter().chain(std::iter::once(&EXAMPLE)) {
-            for host in [Some(source.host), source.redirected_to]
+            for host in [Some(source.host), source.also_contacts]
                 .into_iter()
                 .flatten()
             {
@@ -209,7 +285,7 @@ mod tests {
     #[test]
     fn a_redirect_target_is_a_different_host() {
         for source in SOURCES {
-            if let Some(elsewhere) = source.redirected_to {
+            if let Some(elsewhere) = source.also_contacts {
                 assert_ne!(
                     elsewhere, source.host,
                     "{} declares a redirect to itself",
@@ -242,6 +318,48 @@ mod tests {
                 source.id
             );
         }
+    }
+
+    /// A source whose requests are made by something else has to say what that
+    /// something is. Without it the registry still lists every host, and still
+    /// quietly stops being the complete answer to "what can this build reach",
+    /// because nobody can tell which of those hosts this application is not the
+    /// one talking to.
+    #[test]
+    fn a_delegated_source_names_the_program() {
+        for source in SOURCES {
+            if let Some(program) = source.via {
+                assert!(
+                    !program.trim().is_empty(),
+                    "{} delegates its requests to nothing",
+                    source.id
+                );
+                assert!(
+                    !program.contains(' '),
+                    "{program} is not the name of a single program"
+                );
+            }
+        }
+
+        assert_eq!(
+            find("youtube").and_then(|source| source.via),
+            Some("yt-dlp"),
+            "YouTube audio is fetched by yt-dlp, and the registry has to say so"
+        );
+    }
+
+    /// The exception should stay one. Every delegated source is a set of
+    /// requests this crate cannot see, and if that ever stops being a special
+    /// case then the honest thing is a bigger change than one field, not more
+    /// entries like this.
+    #[test]
+    fn delegation_is_the_exception() {
+        let delegated = SOURCES.iter().filter(|source| source.via.is_some()).count();
+
+        assert!(
+            delegated <= 1,
+            "{delegated} sources have their requests made by something else"
+        );
     }
 
     #[test]
