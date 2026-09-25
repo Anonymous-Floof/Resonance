@@ -77,6 +77,9 @@ with the operating system.
   play, including under shuffle — jump to anything, drop anything, or clear it
 - Right-click any track for **Play next** or **Add to queue**
 - Output device picker and buffer size control, applied without a restart
+- **Play a link** — a YouTube or YouTube Music song, playlist, album or mix —
+  and **save** any of it into your library as ordinary tagged files.
+  [Optional](#playing-from-a-link), off by default, and needs yt-dlp
 
 **Playlists**
 - Ordinary playlists, built by adding from your library or from suggestions
@@ -237,18 +240,24 @@ The same list is in **Settings → Keyboard**.
 
 ## Where your files live
 
-Resonance writes to these directories and nowhere else. **Nothing is ever
-written next to your music.**
+Resonance writes to these directories and nowhere else. **Nothing is written
+next to your music** unless you [save a track from a link](#saving-to-your-library),
+and then only into a `Resonance Downloads` folder of its own.
 
 | What | Where |
 |---|---|
 | Settings | `%APPDATA%\Resonance\config\config.toml` |
 | Library index | `%APPDATA%\Resonance\data\library.db` |
 | Logs | `%APPDATA%\Resonance\data\logs\` |
+| Network activity log | `%APPDATA%\Resonance\data\network-activity.log` |
 | Cover thumbnails | `%LOCALAPPDATA%\Resonance\cache\art\` |
+| Remembered online answers | `%LOCALAPPDATA%\Resonance\cache\` |
+| Audio fetched from links, up to 2 GB | `%LOCALAPPDATA%\Resonance\cache\audio\` |
+| Tracks you save | `Resonance Downloads\` inside the music folder you choose |
 
-(In [portable mode](#portable-mode), all four move to `Resonance-data\` beside
-the executable.)
+(In [portable mode](#portable-mode), everything but saved tracks moves to
+`Resonance-data\` beside the executable. Saved tracks stay in your music
+folder, because that is the point of saving them.)
 
 `config.toml` is plain TOML and meant to be hand-editable. Anything out of range
 is clamped on load, and a file that will not parse is set aside rather than
