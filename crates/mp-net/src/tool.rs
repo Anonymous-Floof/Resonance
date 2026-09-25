@@ -161,15 +161,28 @@ impl YtDlp {
 
 impl Runner for YtDlp {
     fn run(&self, args: &[&str], timeout: Duration) -> Result<Output, NetError> {
-        let mut child = Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        command
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|err| {
-                NetError::Transport(format!("could not run {}: {err}", self.program.display()))
-            })?;
+            .stderr(Stdio::piped());
+
+        // Resonance is a windowed program with no console of its own, and
+        // Windows gives a console program started from one a fresh console
+        // window. yt-dlp is a console program - and installed through pip it is
+        // a launcher that starts Python, which is what showed on screen - so
+        // without this every lookup flashed a window over the player.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let mut child = command.spawn().map_err(|err| {
+            NetError::Transport(format!("could not run {}: {err}", self.program.display()))
+        })?;
 
         // Drained on their own threads. Polling for exit while the pipes fill
         // is how this deadlocks: the child blocks writing, the parent blocks
