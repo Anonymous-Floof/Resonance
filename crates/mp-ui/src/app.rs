@@ -28,6 +28,7 @@ use crate::lyrics_job::LyricsJob;
 use crate::platform::{MediaCommand, MediaControls, NowPlayingInfo, PlaybackState};
 use crate::player::Player;
 use crate::playlists::PlaylistState;
+use crate::save_queue::{SaveItem, SaveQueue};
 use crate::shortcuts::{self, Action};
 use crate::surface;
 use crate::tag_editor::TagEditor;
@@ -35,7 +36,15 @@ use crate::theme::{Theme, col, col_alpha};
 use crate::views::{self, View, browse};
 use crate::visualizer::Visualizers;
 use crate::widgets::{self, icons::Icon};
-use crate::youtube_job::{Answer as LinkAnswer, ToolStatus, YoutubeJob};
+use crate::youtube_job::{Answer as LinkAnswer, Purpose, ToolStatus, YoutubeJob};
+
+/// A link the user pasted while the worker was busy, and how they asked for it.
+#[derive(Debug)]
+struct PendingLink {
+    link: String,
+    skip_segments: bool,
+    whole_list: bool,
+}
 
 /// Settings are saved this long after the last edit, so dragging a slider
 /// writes the file once rather than sixty times a second.
@@ -113,6 +122,19 @@ pub struct ResonanceApp {
     /// ahead of the player by [`Self::tend_link_queue`], and dropped the
     /// moment the user plays anything else.
     link_queue: Option<LinkQueue>,
+
+    /// Tracks waiting to be saved into the library. Handed to the link worker
+    /// whenever nothing the listener is waiting on needs it.
+    save_queue: SaveQueue,
+
+    /// A link pasted while the worker was busy with something in the
+    /// background, sent the moment it is free. Held rather than refused: with
+    /// a playlist saving, the worker is busy nearly all the time, and a box
+    /// that said "try again later" would be a box that never worked.
+    pending_link: Option<PendingLink>,
+
+    /// Whether the link most recently sent asked for a saved copy.
+    pasted_save: bool,
 
     /// Whether the first-run welcome is still showing.
     ///
@@ -269,6 +291,9 @@ impl ResonanceApp {
             yt_dlp_looked_for: None,
             open_url: views::open_url::OpenUrl::default(),
             link_queue: None,
+            save_queue: SaveQueue::default(),
+            pending_link: None,
+            pasted_save: false,
             welcome: first_run,
             focus_search: false,
             media,
@@ -992,6 +1017,43 @@ impl ResonanceApp {
                 self.go_to(View::Equalizer);
             }
 
+            // Only for a track fetched from a link: everything else is already
+            // in the library, which is where this would put it.
+            let fetched = self
+                .player
+                .current_path()
+                .and_then(|path| self.player.stream_facts(path))
+                .map(|facts| {
+                    (
+                        facts.video_id.clone(),
+                        facts.title.clone(),
+                        facts.album.clone(),
+                    )
+                });
+
+            if let Some((video_id, title, album)) = fetched {
+                let asked = self.save_queue.has_asked(&video_id);
+                let label = if asked {
+                    "Saved to Resonance Downloads, or on its way"
+                } else {
+                    "Save to Resonance Downloads"
+                };
+
+                if widgets::icon_button_labelled(
+                    ui,
+                    &self.theme,
+                    Icon::Download,
+                    m.space(3.0),
+                    asked,
+                    label,
+                )
+                .clicked()
+                    && !asked
+                {
+                    self.save_track(&video_id, &title, album);
+                }
+            }
+
             ui.add_space(m.space(0.5));
 
             let volume = self.config.playback.volume;
@@ -1269,6 +1331,12 @@ impl ResonanceApp {
         let m = self.theme.metrics;
         let cursor = self.player.queue_cursor();
         let upcoming = self.link_queue.as_ref().and_then(LinkQueue::upcoming_note);
+        let saving = self.save_queue.status();
+        let extras = views::queue::Extras {
+            upcoming: upcoming.as_deref(),
+            offer_save_list: self.list_is_unsaved() && self.downloads_dir().is_some(),
+            saving: saving.as_deref(),
+        };
 
         let outcome = egui::Panel::right("queue")
             .exact_size(m.queue_width)
@@ -1288,13 +1356,26 @@ impl ResonanceApp {
                     &self.queue_rows,
                     cursor,
                     self.config.playback.play_on_single_click,
-                    upcoming.as_deref(),
+                    &extras,
                 )
             })
             .inner;
 
         if let Some(index) = outcome.jump {
             self.player.jump_to(index);
+        }
+        if outcome.save_list
+            && let Some(queue) = self.link_queue.take()
+        {
+            self.save_list(&queue);
+            self.link_queue = Some(queue);
+        }
+        if outcome.stop_saving {
+            self.save_queue.stop();
+            self.player.notice(
+                "Stopped saving. The track in progress will finish.".to_owned(),
+                false,
+            );
         }
         if let Some((id, name)) = outcome.open_artist {
             self.open_artist(id, name);
@@ -2230,18 +2311,18 @@ impl ResonanceApp {
             return;
         };
 
-        let answer = reply.answer;
-
-        // The next track of a list that has since been dropped - the user
-        // played something else while it was fetched. It is in the cache if it
-        // is ever wanted; playing it now would take over from whatever the
-        // user has just chosen.
-        let for_the_list =
-            reply.for_a_list && self.link_queue.as_ref().is_some_and(LinkQueue::is_fetching);
-
-        if reply.for_a_list && !for_the_list {
-            return;
+        match reply.purpose {
+            Purpose::Pasted => self.pasted_landed(reply.answer),
+            Purpose::NextInList => self.next_in_list_landed(reply.answer),
+            Purpose::Save => self.save_landed(reply.answer),
         }
+
+        ctx.request_repaint();
+    }
+
+    /// What came of a link the user pasted.
+    fn pasted_landed(&mut self, answer: LinkAnswer) {
+        let save = std::mem::take(&mut self.pasted_save);
 
         match answer {
             LinkAnswer::Listed { listing, start_at } => {
@@ -2255,44 +2336,21 @@ impl ResonanceApp {
                     ),
                 };
                 self.player.notice(message, false);
-                self.link_queue = Some(queue);
-            }
-            LinkAnswer::Ready { path, facts } if for_the_list => {
-                let idle = self.player.current_path().is_none();
-                if let Some(queue) = self.link_queue.as_mut() {
-                    match queue.landed(path.clone(), idle) {
-                        Handoff::PlayNow => self.player.play_stream(path, *facts),
-                        Handoff::Enqueue => self.player.enqueue_stream(path, *facts),
-                    }
+
+                if save {
+                    self.save_list(&queue);
                 }
+
+                self.link_queue = Some(queue);
             }
             LinkAnswer::Ready { path, facts } => {
                 self.open_url.close();
-                self.player.play_stream(path, *facts);
-            }
-            LinkAnswer::Nothing {
-                why,
-                blocks_the_rest,
-            } if for_the_list => {
-                if let Some(queue) = self.link_queue.as_mut() {
-                    let title = queue.fetching_title().unwrap_or("A track").to_owned();
-                    let list = queue.title().to_owned();
 
-                    match queue.missed(blocks_the_rest) {
-                        AfterMiss::CarryOn => self.player.notice(
-                            format!(
-                                "Skipped \u{201c}{title}\u{201d} from \u{201c}{list}\u{201d}. {why}"
-                            ),
-                            false,
-                        ),
-                        // Said once, as an error, rather than once per track:
-                        // whatever this was will happen to every one of them.
-                        AfterMiss::GiveUp => self.player.notice(
-                            format!("Stopped fetching \u{201c}{list}\u{201d}. {why}"),
-                            true,
-                        ),
-                    }
+                if save {
+                    self.save_track(&facts.video_id, &facts.title, facts.album.clone());
                 }
+
+                self.player.play_stream(path, *facts);
             }
             LinkAnswer::Nothing { why, .. } => {
                 // Left on the dialog rather than raised as a notice: the user
@@ -2304,25 +2362,147 @@ impl ResonanceApp {
                     self.player.notice(why, true);
                 }
             }
+            LinkAnswer::Kept { .. } => {}
         }
-
-        ctx.request_repaint();
     }
 
-    /// Keep a playlist from a link one track ahead of the player.
-    ///
-    /// Every frame, and cheap: it only compares paths until a fetch is due.
-    /// Waits while the link box is open, so the worker is free for whatever
-    /// the user is about to paste rather than busy with a track they may be
-    /// about to replace.
-    fn tend_link_queue(&mut self) {
-        let Some(queue) = self.link_queue.as_mut() else {
+    /// What came of fetching the next track of a playlist.
+    fn next_in_list_landed(&mut self, answer: LinkAnswer) {
+        // A list that has since been dropped - the user played something else
+        // while this was fetched. It is in the cache if it is ever wanted;
+        // playing it now would take over from whatever the user has just
+        // chosen.
+        let idle = self.player.current_path().is_none();
+        let Some(queue) = self.link_queue.as_mut().filter(|queue| queue.is_fetching()) else {
             return;
         };
 
-        // Switched off, or the worker is gone: nothing more can come.
-        let Some(job) = self.youtube_job.as_mut() else {
-            self.link_queue = None;
+        match answer {
+            LinkAnswer::Ready { path, facts } => match queue.landed(path.clone(), idle) {
+                Handoff::PlayNow => self.player.play_stream(path, *facts),
+                Handoff::Enqueue => self.player.enqueue_stream(path, *facts),
+            },
+            LinkAnswer::Nothing {
+                why,
+                blocks_the_rest,
+            } => {
+                let title = queue.fetching_title().unwrap_or("A track").to_owned();
+                let list = queue.title().to_owned();
+
+                match queue.missed(blocks_the_rest) {
+                    AfterMiss::CarryOn => self.player.notice(
+                        format!(
+                            "Skipped \u{201c}{title}\u{201d} from \u{201c}{list}\u{201d}. {why}"
+                        ),
+                        false,
+                    ),
+                    // Said once, as an error, rather than once per track:
+                    // whatever this was will happen to every one of them.
+                    AfterMiss::GiveUp => self.player.notice(
+                        format!("Stopped fetching \u{201c}{list}\u{201d}. {why}"),
+                        true,
+                    ),
+                }
+            }
+            LinkAnswer::Listed { .. } | LinkAnswer::Kept { .. } => {}
+        }
+    }
+
+    /// What came of saving a track.
+    fn save_landed(&mut self, answer: LinkAnswer) {
+        match answer {
+            LinkAnswer::Kept { title, kept } => {
+                let newly = matches!(kept, mp_core::library::keep::Kept::Saved(_));
+                self.save_queue.done(newly, &title);
+            }
+            LinkAnswer::Nothing {
+                why,
+                blocks_the_rest,
+            } => match self.save_queue.failed(blocks_the_rest) {
+                AfterMiss::CarryOn => self.player.notice(why, true),
+                AfterMiss::GiveUp => self.player.notice(format!("Stopped saving. {why}"), true),
+            },
+            LinkAnswer::Ready { .. } | LinkAnswer::Listed { .. } => {}
+        }
+
+        if let Some(summary) = self.save_queue.take_summary() {
+            self.player.notice(summary, false);
+        }
+    }
+
+    /// Where saved tracks go, or `None` when there is no music folder.
+    fn downloads_dir(&self) -> Option<std::path::PathBuf> {
+        mp_core::library::keep::downloads_dir(
+            &self.config.library.watched_folders,
+            self.config.privacy.youtube_downloads_in.as_deref(),
+        )
+    }
+
+    /// Ask for one track to be saved.
+    fn save_track(&mut self, video_id: &str, title: &str, album: Option<String>) {
+        if self.downloads_dir().is_none() {
+            self.player.notice(
+                "There is no music folder to save into. Add one under Settings, Library."
+                    .to_owned(),
+                true,
+            );
+            return;
+        }
+
+        self.save_queue.add(SaveItem {
+            video_id: video_id.to_owned(),
+            title: title.to_owned(),
+            collection: None,
+            album,
+        });
+    }
+
+    /// Ask for every track of a playlist to be saved, into a folder of its own.
+    fn save_list(&mut self, queue: &LinkQueue) {
+        if self.downloads_dir().is_none() {
+            self.player.notice(
+                "There is no music folder to save into. Add one under Settings, Library."
+                    .to_owned(),
+                true,
+            );
+            return;
+        }
+
+        let items = queue.entries().iter().map(|entry| SaveItem {
+            video_id: entry.video_id.clone(),
+            title: entry.title.clone(),
+            collection: Some(queue.title().to_owned()),
+            album: queue.album().map(str::to_owned),
+        });
+
+        let added = self.save_queue.add_all(items);
+        if added > 0 {
+            self.player.notice(
+                format!(
+                    "Saving {added} track(s) from \u{201c}{}\u{201d} to Resonance Downloads, in the background.",
+                    queue.title()
+                ),
+                false,
+            );
+        }
+    }
+
+    /// Whether any track of the playlist playing is not yet saved or waiting.
+    fn list_is_unsaved(&self) -> bool {
+        self.link_queue.as_ref().is_some_and(|queue| {
+            queue
+                .entries()
+                .iter()
+                .any(|entry| !self.save_queue.has_asked(&entry.video_id))
+        })
+    }
+
+    /// Notice when a playlist from a link has been left behind.
+    ///
+    /// Every frame, and cheap: it only compares paths. Fetching the next track
+    /// is [`Self::dispatch_youtube`]'s business.
+    fn tend_link_queue(&mut self) {
+        let Some(queue) = self.link_queue.as_mut() else {
             return;
         };
 
@@ -2332,28 +2512,89 @@ impl ResonanceApp {
             // The user played something else. That is an answer, not a fault,
             // so nothing is said about it.
             self.link_queue = None;
-            return;
         }
 
-        if queue.is_finished() {
+        // A list that has nothing left to fetch is kept while its tracks are
+        // still in the queue: it is what "Save the whole playlist" saves.
+    }
+
+    /// Give the link worker its next job, if it is free.
+    ///
+    /// One worker, three kinds of work, in the order somebody is waiting on
+    /// them: a link the user pasted, then the next track of the playlist
+    /// playing, then saving. The second and third wait while the link box is
+    /// open, so the worker is free for whatever is about to be pasted rather
+    /// than halfway through a download of something it may replace.
+    fn dispatch_youtube(&mut self) {
+        let Some(job) = self.youtube_job.as_mut() else {
+            // Switched off, or the program is gone: nothing more can come.
             self.link_queue = None;
-            return;
-        }
-
-        if self.open_url.is_open() || job.is_busy() {
-            return;
-        }
-
-        let Some(next) = queue.next_fetch() else {
+            self.pending_link = None;
+            self.save_queue.abandon();
             return;
         };
 
-        let skip_segments = self.config.privacy.online_youtube_sponsorblock;
-        let album = queue.album().map(str::to_owned);
+        if job.is_busy() {
+            return;
+        }
 
-        if !job.fetch_listed(&next.video_id, skip_segments, album) {
-            // Not busy, so the only way here is a worker that has stopped.
-            self.link_queue = None;
+        if let Some(pending) = self.pending_link.take() {
+            match job.want(&pending.link, pending.skip_segments, pending.whole_list) {
+                // Whatever list was playing, the user has asked for something
+                // else. Its remaining tracks must not keep arriving behind it.
+                Ok(()) => self.link_queue = None,
+                Err(problem) => {
+                    self.pasted_save = false;
+                    if self.open_url.is_open() {
+                        self.open_url.set_problem(problem);
+                    } else {
+                        self.player.notice(problem, true);
+                    }
+                }
+            }
+            return;
+        }
+
+        if self.open_url.is_open() {
+            return;
+        }
+
+        if let Some(queue) = self.link_queue.as_mut()
+            && let Some(next) = queue.next_fetch()
+        {
+            let skip_segments = self.config.privacy.online_youtube_sponsorblock;
+            let album = queue.album().map(str::to_owned);
+
+            if !job.fetch_listed(&next.video_id, skip_segments, album) {
+                // Not busy, so the only way here is a worker that has stopped.
+                self.link_queue = None;
+            }
+            return;
+        }
+
+        if self.save_queue.is_idle() {
+            return;
+        }
+
+        let downloads = mp_core::library::keep::downloads_dir(
+            &self.config.library.watched_folders,
+            self.config.privacy.youtube_downloads_in.as_deref(),
+        );
+
+        let Some(downloads) = downloads else {
+            // The folder was removed from the library while saves waited.
+            self.save_queue.abandon();
+            self.player.notice(
+                "Stopped saving: there is no longer a music folder to save into.".to_owned(),
+                true,
+            );
+            return;
+        };
+
+        if let Some(item) = self.save_queue.next_save()
+            && !job.save(&item.video_id, downloads, item.collection, item.album)
+        {
+            self.save_queue.abandon();
         }
     }
 
@@ -2372,15 +2613,33 @@ impl ResonanceApp {
             return;
         }
 
-        let working = self.youtube_job.as_ref().and_then(YoutubeJob::working);
+        // Only what the user is waiting on is described in the box. The next
+        // track of a playlist, or a save, is the worker being busy for someone
+        // else, and a link pasted meanwhile simply waits for it.
+        let working = if self.pending_link.is_some() {
+            Some("Waiting for the track already being fetched")
+        } else {
+            self.youtube_job
+                .as_ref()
+                .filter(|job| job.in_flight() == Some(Purpose::Pasted))
+                .and_then(YoutubeJob::working)
+        };
+
+        let save_into = self.downloads_dir();
 
         let names_both = {
             let query = mp_net::youtube::Query::new(self.open_url.text());
             query.video_id().is_some() && query.playlist_link().is_some()
         };
 
-        let outcome =
-            views::open_url::show(ctx, &self.theme, &mut self.open_url, working, names_both);
+        let outcome = views::open_url::show(
+            ctx,
+            &self.theme,
+            &mut self.open_url,
+            working,
+            names_both,
+            save_into.as_deref(),
+        );
 
         if outcome.play {
             let link = self.open_url.text().to_owned();
@@ -2392,19 +2651,45 @@ impl ResonanceApp {
             // different fixes, and naming the wrong one costs an afternoon.
             // The worker says which of its own it is; a missing worker is the
             // program not being there at all.
+            let whole_list = !outcome.video_only;
+            let save = self.open_url.save && save_into.is_some();
+
             let problem = match self.youtube_job.as_mut() {
-                Some(job) => job.want(&link, skip_segments, !outcome.video_only).err(),
+                // Busy with the next track of a playlist, or with saving. The
+                // link is checked now, so a bad one is refused at once, and
+                // sent as soon as the worker is free.
+                Some(job) if job.is_busy() => {
+                    match crate::youtube_job::check_link(&link, whole_list) {
+                        Ok(()) => {
+                            self.pending_link = Some(PendingLink {
+                                link,
+                                skip_segments,
+                                whole_list,
+                            });
+                            self.pasted_save = save;
+                            None
+                        }
+                        Err(problem) => Some(problem),
+                    }
+                }
+                Some(job) => match job.want(&link, skip_segments, whole_list) {
+                    Ok(()) => {
+                        self.pasted_save = save;
+                        // Whatever list was playing, the user has just asked
+                        // for something else. Its remaining tracks must not
+                        // keep arriving behind the new one.
+                        self.link_queue = None;
+                        None
+                    }
+                    Err(problem) => Some(problem),
+                },
                 None => Some(
                     "yt-dlp was not found, so links cannot be played. Settings, Online says where it looked.".to_owned(),
                 ),
             };
 
-            match problem {
-                Some(problem) => self.open_url.set_problem(problem),
-                // Whatever list was playing, the user has just asked for
-                // something else. Its remaining tracks must not keep arriving
-                // behind the new one.
-                None => self.link_queue = None,
+            if let Some(problem) = problem {
+                self.open_url.set_problem(problem);
             }
         }
 
@@ -3565,6 +3850,7 @@ impl eframe::App for ResonanceApp {
         self.tend_artwork(ui.ctx());
         self.tend_youtube(ui.ctx());
         self.tend_link_queue();
+        self.dispatch_youtube();
 
         // Lyrics are read from disk, so this only does anything while the
         // full-screen view is open and the track has changed under it. The

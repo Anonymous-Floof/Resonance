@@ -89,6 +89,10 @@ enum Link {
 pub struct Outcome {
     /// Jump to this engine-side index.
     pub jump: Option<usize>,
+    /// Save every track of the playlist that is playing from a link.
+    pub save_list: bool,
+    /// Stop saving whatever is still waiting to be saved.
+    pub stop_saving: bool,
     /// Drop this engine-side index from the queue.
     pub remove: Option<usize>,
     /// Empty the queue.
@@ -113,15 +117,15 @@ pub struct Outcome {
 /// engine index: the panel renders a list, and what it needs to know is which
 /// line of that list to mark.
 ///
-/// `upcoming` is a sentence about tracks that are coming but not queued yet,
-/// if there are any.
+/// `extras` is what the panel should say about things that are not rows: a
+/// playlist still arriving, and saving in progress.
 pub fn show(
     ui: &mut Ui,
     theme: &Theme,
     rows: &[Row],
     cursor: Option<usize>,
     single_click: bool,
-    upcoming: Option<&str>,
+    extras: &Extras<'_>,
 ) -> Outcome {
     let mut outcome = Outcome::default();
     let m = theme.metrics;
@@ -131,18 +135,13 @@ pub fn show(
 
     // Above the rows rather than after them: the list scrolls, and the end of
     // it is exactly where nobody looks.
-    if let Some(upcoming) = upcoming {
-        ui.add_space(m.space(0.75));
-        ui.label(
-            egui::RichText::new(upcoming)
-                .text_style(TextStyle::Name("caption".into()))
-                .color(col(theme.palette.text_muted)),
-        );
-        ui.add_space(m.space(0.75));
+    let has_extras = !extras.is_empty();
+    if has_extras {
+        extras_block(ui, theme, extras, &mut outcome);
     }
 
     if rows.is_empty() {
-        if upcoming.is_none() {
+        if !has_extras {
             empty(ui, theme);
         }
         return outcome;
@@ -349,6 +348,65 @@ fn plural(count: usize) -> &'static str {
 }
 
 /// Shown when nothing is queued at all.
+/// What the panel says about things that are not rows.
+#[derive(Debug, Default)]
+pub struct Extras<'a> {
+    /// Tracks of a playlist that are coming but not queued yet.
+    pub upcoming: Option<&'a str>,
+    /// Offer to save every track of the playlist playing from a link.
+    pub offer_save_list: bool,
+    /// How saving is going, while it is.
+    pub saving: Option<&'a str>,
+}
+
+impl Extras<'_> {
+    fn is_empty(&self) -> bool {
+        self.upcoming.is_none() && !self.offer_save_list && self.saving.is_none()
+    }
+}
+
+fn extras_block(ui: &mut Ui, theme: &Theme, extras: &Extras<'_>, outcome: &mut Outcome) {
+    let m = theme.metrics;
+    let caption = |text: &str| {
+        egui::RichText::new(text)
+            .text_style(TextStyle::Name("caption".into()))
+            .color(col(theme.palette.text_muted))
+    };
+
+    ui.add_space(m.space(0.75));
+
+    if let Some(upcoming) = extras.upcoming {
+        ui.label(caption(upcoming));
+    }
+
+    if extras.offer_save_list
+        && ui
+            .small_button("Save the whole playlist")
+            .on_hover_text(
+                "Every track of it, into Resonance Downloads, in a folder named after the playlist",
+            )
+            .clicked()
+    {
+        outcome.save_list = true;
+    }
+
+    if let Some(saving) = extras.saving {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(caption(saving));
+            if ui
+                .small_button("Stop")
+                .on_hover_text("The track being saved finishes; the rest are not saved")
+                .clicked()
+            {
+                outcome.stop_saving = true;
+            }
+        });
+    }
+
+    ui.add_space(m.space(0.75));
+}
+
 fn empty(ui: &mut Ui, theme: &Theme) {
     let m = theme.metrics;
     ui.add_space(m.space(3.0));

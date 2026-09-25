@@ -13,6 +13,7 @@ pub mod lyrics_job;
 pub mod platform;
 pub mod player;
 pub mod playlists;
+pub mod save_queue;
 pub mod shortcuts;
 pub mod surface;
 pub mod tag_editor;

@@ -49,6 +49,8 @@ pub struct LinkQueue {
     /// answer names no album.
     album: Option<String>,
     upcoming: VecDeque<Listed>,
+    /// Every entry of the list as read, played or not, for saving all of it.
+    all: Vec<Listed>,
     total: usize,
     /// How many have been given to the player so far.
     handed: usize,
@@ -76,6 +78,7 @@ impl LinkQueue {
     pub fn new(listing: Listing, start_at: Option<&str>) -> Self {
         let album = listing.is_album().then(|| listing.title.clone());
         let title = listing.title.clone();
+        let all = listing.entries.clone();
 
         let mut upcoming: VecDeque<Listed> = match start_at {
             Some(video_id) => match listing.position_of(video_id) {
@@ -100,6 +103,7 @@ impl LinkQueue {
             album,
             total: upcoming.len(),
             upcoming,
+            all,
             handed: 0,
             in_flight: None,
             ready: None,
@@ -119,6 +123,11 @@ impl LinkQueue {
 
     pub fn total(&self) -> usize {
         self.total
+    }
+
+    /// Every entry of the list, from the top, whether or not it has played.
+    pub fn entries(&self) -> &[Listed] {
+        &self.all
     }
 
     /// The next video to fetch, if one is due.

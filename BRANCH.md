@@ -32,6 +32,8 @@ Everything the offline constraint made impossible:
 - **Playing a YouTube link** — done, via `yt-dlp`
 - **Skipping the parts that are not the song** — done, via SponsorBlock
 - **Playlists, albums and mixes from a link** — done, one track ahead
+- **Saving a track or a playlist into the library** — done, into
+  `Resonance Downloads`
 - Artist and genre metadata, MusicBrainz-style
 - Whatever else you have planned
 
@@ -101,6 +103,16 @@ commit.
 That rule is not suspended here. Fetched artwork and lyrics go to the app's own
 cache, not into the music folders, and not into tags — unless tag editing is
 explicitly enabled, which is off by default and journalled for undo.
+
+Saving a track from a link is the one thing here that puts a file into a music
+folder, and it was built so that this rule survives it. It writes only when
+asked, only new files, only under a `Resonance Downloads` folder inside the
+watched folder the user picked, and never over anything already there — a file
+at the destination is left exactly as it is, whoever put it there. The copy is
+made and tagged under a name the scanner ignores and renamed into place
+complete, so a scan never sees half a track. All of it is in
+`crates/mp-core/src/library/keep.rs`, apart from the tag editor on purpose: the
+editor changes files the user has, and this makes files they asked for.
 
 ## The claims that had to change, and did
 

@@ -1392,7 +1392,7 @@ fn online_section(
             note(
                 ui,
                 theme,
-                "The audio is fetched into this app's cache and played from there. Nothing is added to your library, nothing is written to your music folders, and no account or cookie is ever involved.",
+                "The audio is fetched into this app's cache and played from there. Nothing is added to your library or written to your music folders unless you save a track, and no account or cookie is ever involved.",
             );
 
             ui.add_space(m.space(1.0));
@@ -1452,6 +1452,9 @@ fn online_section(
                     if widgets::accent_button(ui, theme, "Play from a link").clicked() {
                         out.open_url = true;
                     }
+
+                    ui.add_space(m.space(1.0));
+                    downloads_row(ui, theme, config, out);
                 }
             }
         }
@@ -1507,6 +1510,70 @@ fn online_section(
             }
         });
     });
+}
+
+/// Where saved tracks go, and the choice of watched folder when there is one
+/// to make.
+fn downloads_row(ui: &mut Ui, theme: &Theme, config: &mut Config, out: &mut SettingsOutcome) {
+    use mp_core::library::keep;
+
+    let watched = config.library.watched_folders.clone();
+    let chosen = config.privacy.youtube_downloads_in.clone();
+
+    let Some(dir) = keep::downloads_dir(&watched, chosen.as_deref()) else {
+        note(
+            ui,
+            theme,
+            "Saving a track needs a music folder to save it into. Add one under Library, and saved tracks will go into a Resonance Downloads folder inside it.",
+        );
+        return;
+    };
+
+    if watched.len() > 1 {
+        let current = dir.parent().map(std::path::Path::to_path_buf);
+
+        row(
+            ui,
+            theme,
+            "Save tracks into",
+            "Which music folder holds Resonance Downloads",
+            |ui| {
+                let mut changed = false;
+                egui::ComboBox::from_id_salt("downloads_in")
+                    .selected_text(
+                        current
+                            .as_deref()
+                            .map(|folder| folder.display().to_string())
+                            .unwrap_or_default(),
+                    )
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for folder in &watched {
+                            let selected = current.as_deref() == Some(folder.as_path());
+                            if ui
+                                .selectable_label(selected, folder.display().to_string())
+                                .clicked()
+                                && !selected
+                            {
+                                config.privacy.youtube_downloads_in = Some(folder.clone());
+                                changed = true;
+                            }
+                        }
+                    });
+                changed
+            },
+        )
+        .apply(out);
+    }
+
+    note(
+        ui,
+        theme,
+        &format!(
+            "Saved tracks go into {}, where the library picks them up like anything else. Only new files are ever written there: nothing already in your music folders is replaced or changed.",
+            dir.display()
+        ),
+    );
 }
 
 fn privacy_section(ui: &mut Ui, theme: &Theme, config: &mut Config, out: &mut SettingsOutcome) {

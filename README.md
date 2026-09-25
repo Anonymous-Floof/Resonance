@@ -39,6 +39,7 @@ with the operating system.
   - [Editing tags safely](#editing-tags-safely)
   - [Online lookups](#online-lookups)
   - [Playing from a link](#playing-from-a-link)
+  - [Saving to your library](#saving-to-your-library)
   - [Skipping what is not the song](#skipping-what-is-not-the-song)
   - [Format support](#format-support)
 - [For developers](#for-developers) — build it and change it
@@ -109,7 +110,8 @@ with the operating system.
 
 **Privacy and safety**
 - **Never modifies your audio files.** Tag editing is off by default, and every
-  edit it does make is reversible from a history panel.
+  edit it does make is reversible from a history panel. A track you save from a
+  link is a new file in a folder of its own, and never replaces anything.
 - **Nothing leaves your machine unless you switch it on.** Your library and
   suggestions are built locally and always have been. Four features reach out
   — [lyrics, cover art, playing a link, and skipping the parts of one that are
@@ -424,10 +426,11 @@ none after. Nothing is fetched that you do not get to.
 | **When** | When you paste a link, and during a playlist, once per track as the one before it starts |
 | **If it fails** | Nothing plays, and the box says why |
 
-**Nothing is added to your library, and nothing is written to your music
-folders.** A fetched track plays from the cache and is gone from the library's
-point of view the moment it stops; your index, your play counts and your
-folders are untouched.
+**Unless you save it, nothing is added to your library and nothing is written
+to your music folders.** A fetched track plays from the cache and is gone from
+the library's point of view the moment it stops; your index, your play counts
+and your folders are untouched. [Saving](#saving-to-your-library) is the one
+way to keep it.
 
 The cache has a ceiling of 2 GB and forgets the oldest first. **Settings →
 Online → Clear fetched audio** empties it now — anything you play again is
@@ -438,6 +441,44 @@ Resonance [cannot decode Opus](#format-support). So it asks for the AAC stream
 instead, which is a little lower quality and is the one that actually plays. A
 video offering nothing but Opus is reported as unplayable rather than
 downloaded and then failed on.
+
+### Saving to your library
+
+A track you play from a link can become an ordinary file in your library, for
+single songs and whole playlists alike.
+
+- **While it plays**, the download button in the player bar saves it.
+- **When you paste a link**, tick *Save a copy to my library* in the box. For a
+  playlist or album that saves every track of it, not only the ones you get to.
+- **During a playlist**, the queue panel offers *Save the whole playlist*.
+
+Everything goes into a folder called **`Resonance Downloads`** inside one of
+your music folders — the first, unless you pick another in **Settings → Online**
+— so what Resonance fetched never mingles with the music you put there
+yourself, and all of it can be found, or deleted, in one place.
+
+```
+Resonance Downloads/
+├── Rick Astley - Together Forever.m4a         a single song
+└── Are We There Yet_/                          a playlist or album, in its own folder
+    ├── Rick Astley - Dippin My Feet.m4a
+    └── Rick Astley - Letting Go.m4a
+```
+
+The library picks them up like anything else you add. Each is tagged with its
+title, artist, album where there is one, and cover, and its comment says which
+link it came from, so a download can always be traced.
+
+- **Nothing is ever replaced.** If a file with that name is already there, it is
+  left exactly as it is and the save counts as done.
+- **Never half a file.** Each track is copied and tagged under a temporary name
+  and only renamed into place once it is complete.
+- **Saving happens in the background**, one track at a time, after anything you
+  are waiting to hear. The queue panel shows how far it has got and can stop
+  it; the track in progress finishes.
+- **A track already fetched costs a copy** — nothing is downloaded twice.
+- **Saving needs a music folder.** With none set up, the options say so rather
+  than saving somewhere the library does not look.
 
 ### Skipping what is not the song
 
@@ -646,7 +687,7 @@ scripted fake. **No test in the workspace opens a socket.**
 ## Tests
 
 ```bash
-cargo test --workspace          # 1022 tests
+cargo test --workspace          # 1050 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```

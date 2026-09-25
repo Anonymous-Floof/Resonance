@@ -29,7 +29,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
-use mp_core::library::art::ArtCache;
+use mp_core::library::art::{ArtCache, ArtSize};
+use mp_core::library::keep::{self, Kept};
 use mp_core::library::names;
 use mp_net::Activity;
 use mp_net::sponsorblock;
@@ -149,6 +150,7 @@ pub enum Stage {
     Idle,
     Fetching,
     Listing,
+    Saving,
 }
 
 impl Stage {
@@ -156,6 +158,7 @@ impl Stage {
         match code {
             2 => Self::Fetching,
             3 => Self::Listing,
+            4 => Self::Saving,
             _ => Self::Idle,
         }
     }
@@ -165,6 +168,7 @@ impl Stage {
             Self::Idle => 0,
             Self::Fetching => 2,
             Self::Listing => 3,
+            Self::Saving => 4,
         }
     }
 
@@ -174,16 +178,10 @@ impl Stage {
             Self::Idle => None,
             Self::Fetching => Some("Fetching the audio"),
             Self::Listing => Some("Reading the playlist"),
+            Self::Saving => Some("Saving to Resonance Downloads"),
         }
     }
 }
-
-/// What to say while the next track of a playlist is being made ready.
-///
-/// Its own label because it is not what the user asked for just now: a box
-/// opened while it runs should say the wait is for the playlist, not suggest
-/// the new link has already been taken.
-pub const GETTING_NEXT_READY: &str = "Getting the next track in the playlist ready";
 
 /// Why a link could not be sent at all, when something is already running.
 pub const BUSY: &str =
@@ -203,6 +201,8 @@ pub enum Answer {
         /// The video the link named alongside the list, to start from.
         start_at: Option<String>,
     },
+    /// A track saved into the library, or found already there.
+    Kept { title: String, kept: Kept },
     /// Nothing playable, and why not in words the user can act on.
     Nothing {
         why: String,
@@ -212,15 +212,32 @@ pub enum Answer {
     },
 }
 
+/// Who asked for a job.
+///
+/// Carried back with the answer, because the same answer means different
+/// things to different askers: a fetched track is played at once if the user
+/// pasted it, queued if a playlist asked for it, and only reported if it was
+/// being saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// A link the user has just given, and is waiting on.
+    Pasted,
+    /// The next track of a playlist that is playing.
+    NextInList,
+    /// A track being saved into the library.
+    Save,
+}
+
 /// An answer, and whom it is for.
+///
+/// An answer can outlive its reason: the user plays something else while the
+/// next track of a list is fetched, and the fetch finishes anyway. Knowing
+/// who asked is what lets such an answer be dropped rather than mistaken for a
+/// link that has just been pasted.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reply {
     pub answer: Answer,
-    /// Whether this was the next track of a playlist rather than something
-    /// the user pasted. Such an answer can outlive its list - the user played
-    /// something else while it was being fetched - and must then be dropped,
-    /// never mistaken for a link that has just been asked for.
-    pub for_a_list: bool,
+    pub purpose: Purpose,
 }
 
 /// What the worker is asked to do.
@@ -238,6 +255,14 @@ enum Job {
     },
     /// What is in a playlist, and nothing more.
     List { query: Query },
+    /// One video, fetched if it is not already, and saved into the library.
+    Keep {
+        query: Query,
+        downloads: PathBuf,
+        /// The playlist it came from, which becomes its folder.
+        collection: Option<String>,
+        album: Option<String>,
+    },
 }
 
 /// A worker thread that turns links into files.
@@ -245,20 +270,15 @@ pub struct YoutubeJob {
     jobs: Sender<Job>,
     answers: Receiver<Answer>,
     stage: Arc<AtomicU8>,
-    /// Set while something is in flight, so a second paste does not queue up
-    /// behind the first without saying so.
-    busy: bool,
-    /// Whether what is in flight is the next track of a playlist rather than
-    /// something the user has just asked for.
-    background: bool,
+    /// Who asked for what is in flight, or `None` when nothing is.
+    in_flight: Option<Purpose>,
 }
 
 impl std::fmt::Debug for YoutubeJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("YoutubeJob")
             .field("stage", &self.stage())
-            .field("busy", &self.busy)
-            .field("background", &self.background)
+            .field("in_flight", &self.in_flight)
             .finish()
     }
 }
@@ -329,8 +349,7 @@ impl YoutubeJob {
             jobs,
             answers,
             stage,
-            busy: false,
-            background: false,
+            in_flight: None,
         })
     }
 
@@ -339,24 +358,22 @@ impl YoutubeJob {
     }
 
     pub fn is_busy(&self) -> bool {
-        self.busy
+        self.in_flight.is_some()
+    }
+
+    /// Who asked for what is in flight.
+    pub fn in_flight(&self) -> Option<Purpose> {
+        self.in_flight
     }
 
     /// What to say while this is working, or `None` when it is idle.
     ///
-    /// Driven by `busy` rather than by the stage alone. There is a moment
-    /// between a link being sent and the worker picking it up where the stage
-    /// is still idle, and a button that went live in that gap would accept a
-    /// second link and then refuse it for the wrong reason.
+    /// Driven by what is in flight rather than by the stage alone. There is a
+    /// moment between a job being sent and the worker picking it up where the
+    /// stage is still idle, and a button that went live in that gap would
+    /// accept a second link and then refuse it for the wrong reason.
     pub fn working(&self) -> Option<&'static str> {
-        if !self.busy {
-            return None;
-        }
-
-        if self.background {
-            return Some(GETTING_NEXT_READY);
-        }
-
+        self.in_flight?;
         Some(working_label(self.stage()))
     }
 
@@ -373,12 +390,12 @@ impl YoutubeJob {
         skip_segments: bool,
         whole_list: bool,
     ) -> Result<(), String> {
-        if self.busy {
+        if self.is_busy() {
             return Err(BUSY.to_owned());
         }
 
         let job = job_for(Query::new(link), skip_segments, whole_list)?;
-        self.send(job, false)
+        self.send(job, Purpose::Pasted)
     }
 
     /// Fetch one video of a playlist that is already playing.
@@ -390,7 +407,7 @@ impl YoutubeJob {
         skip_segments: bool,
         album: Option<String>,
     ) -> bool {
-        if self.busy {
+        if self.is_busy() {
             return false;
         }
 
@@ -400,16 +417,40 @@ impl YoutubeJob {
             album,
         };
 
-        self.send(job, true).is_ok()
+        self.send(job, Purpose::NextInList).is_ok()
     }
 
-    fn send(&mut self, job: Job, background: bool) -> Result<(), String> {
+    /// Save one video into `downloads`, fetching it first if it is not
+    /// already in the cache.
+    ///
+    /// `false` when something is in flight; the caller asks again later.
+    pub fn save(
+        &mut self,
+        video_id: &str,
+        downloads: PathBuf,
+        collection: Option<String>,
+        album: Option<String>,
+    ) -> bool {
+        if self.is_busy() {
+            return false;
+        }
+
+        let job = Job::Keep {
+            query: Query::new(video_id),
+            downloads,
+            collection,
+            album,
+        };
+
+        self.send(job, Purpose::Save).is_ok()
+    }
+
+    fn send(&mut self, job: Job, purpose: Purpose) -> Result<(), String> {
         if self.jobs.send(job).is_err() {
             return Err("The link worker has stopped. Switching Play from a link off and on again starts it afresh.".to_owned());
         }
 
-        self.busy = true;
-        self.background = background;
+        self.in_flight = Some(purpose);
         Ok(())
     }
 
@@ -417,17 +458,16 @@ impl YoutubeJob {
     pub fn poll(&mut self) -> Option<Reply> {
         match self.answers.try_recv() {
             Ok(answer) => {
-                let for_a_list = self.background;
-                self.busy = false;
-                self.background = false;
-                Some(Reply { answer, for_a_list })
+                // Always set while an answer can be outstanding; the fallback
+                // is only there so a surprise cannot become a panic.
+                let purpose = self.in_flight.take().unwrap_or(Purpose::Pasted);
+                Some(Reply { answer, purpose })
             }
             Err(TryRecvError::Empty) => None,
             Err(TryRecvError::Disconnected) => {
                 // The worker is gone, so nothing is coming. Clearing this is
                 // what stops the interface waiting forever on a dead thread.
-                self.busy = false;
-                self.background = false;
+                self.in_flight = None;
                 None
             }
         }
@@ -473,6 +513,14 @@ fn job_for(query: Query, skip_segments: bool, whole_list: bool) -> Result<Job, S
     Err(Trouble::NotALink.message())
 }
 
+/// Whether a link can be asked about, without asking.
+///
+/// For a link pasted while the worker is busy, so a link that will never work
+/// is refused at once rather than after whatever is running has finished.
+pub fn check_link(link: &str, whole_list: bool) -> Result<(), String> {
+    job_for(Query::new(link), false, whole_list).map(|_| ())
+}
+
 /// Whether a failure is about the program rather than the video, so that
 /// working through the rest of a playlist would only fail the same way.
 fn blocks_the_rest(trouble: &Trouble) -> bool {
@@ -492,6 +540,22 @@ fn run(
 ) -> Answer {
     match job {
         Job::List { query } => list(client, query, stage, ctx),
+        Job::Keep {
+            query,
+            downloads,
+            collection,
+            album,
+        } => save(
+            client,
+            art,
+            audio_dir,
+            query,
+            downloads,
+            collection.as_deref(),
+            album.as_deref(),
+            stage,
+            ctx,
+        ),
         Job::Video {
             query,
             skip_segments,
@@ -523,6 +587,80 @@ fn list(client: &Client, query: &Query, stage: &AtomicU8, ctx: &egui::Context) -
         Err(trouble) => Answer::Nothing {
             why: trouble.message(),
             blocks_the_rest: blocks_the_rest(&trouble),
+        },
+    }
+}
+
+/// Save one video into the library.
+///
+/// Fetched through the same cache as playback, so saving a track that has just
+/// played costs a copy and nothing more. The cover goes through the art cache
+/// on the way in, which turns whatever the service sent — often WebP, which
+/// cannot be embedded — into a JPEG that can.
+#[allow(clippy::too_many_arguments)]
+fn save(
+    client: &Client,
+    art: &ArtCache,
+    audio_dir: &Path,
+    query: &Query,
+    downloads: &Path,
+    collection: Option<&str>,
+    album: Option<&str>,
+    stage: &AtomicU8,
+    ctx: &egui::Context,
+) -> Answer {
+    stage.store(Stage::Saving.code(), Ordering::Relaxed);
+    ctx.request_repaint();
+
+    let (resolved, audio) = match client.fetch(query) {
+        Ok(found) => found,
+        Err(trouble) => {
+            return Answer::Nothing {
+                why: trouble.message(),
+                blocks_the_rest: blocks_the_rest(&trouble),
+            };
+        }
+    };
+
+    sweep(audio_dir, CACHE_BUDGET, &audio.path);
+
+    // The same cleaned names playback shows, so a saved track is filed under
+    // the artist it was shown as rather than a channel name.
+    let facts = facts_from(&resolved, None, Vec::new());
+
+    let cover = client
+        .fetch_thumbnail(&resolved)
+        .and_then(|bytes| art.store(&bytes).ok())
+        .and_then(|art_id| art.read(&art_id, ArtSize::Full));
+
+    let details = keep::Details {
+        title: facts.title.clone(),
+        artist: facts.artist,
+        album: facts.album.or_else(|| album.map(str::to_owned)),
+        source: Some(format!(
+            "https://www.youtube.com/watch?v={}",
+            resolved.video_id
+        )),
+        cover,
+    };
+
+    let extension = audio
+        .path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("m4a");
+    let destination = keep::destination(downloads, collection, &details, extension);
+
+    match keep::keep(&audio.path, &destination, &details) {
+        Ok(kept) => Answer::Kept {
+            title: facts.title,
+            kept,
+        },
+        // Where the file cannot be written, the next one cannot either: a
+        // full disk, a folder that went read-only, a drive unplugged.
+        Err(err) => Answer::Nothing {
+            why: format!("Could not save \u{201c}{}\u{201d}: {err:#}", facts.title),
+            blocks_the_rest: true,
         },
     }
 }
@@ -626,6 +764,7 @@ fn facts_from(resolved: &Resolved, art_id: Option<String>, skips: Vec<(f64, f64)
     };
 
     StreamFacts {
+        video_id: resolved.video_id.clone(),
         title,
         artist,
         album: resolved.album.clone(),
@@ -964,6 +1103,7 @@ mod tests {
 
     #[test]
     fn every_stage_but_idle_says_what_is_happening() {
+        assert!(Stage::Saving.label().is_some());
         assert_eq!(Stage::Idle.label(), None);
         assert!(Stage::Fetching.label().is_some());
         assert!(Stage::Listing.label().is_some());
@@ -971,7 +1111,7 @@ mod tests {
 
     #[test]
     fn a_stage_survives_the_trip_through_an_atomic() {
-        for stage in [Stage::Idle, Stage::Fetching, Stage::Listing] {
+        for stage in [Stage::Idle, Stage::Fetching, Stage::Listing, Stage::Saving] {
             assert_eq!(Stage::from_code(stage.code()), stage);
         }
     }

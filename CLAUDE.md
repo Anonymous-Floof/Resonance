@@ -19,6 +19,11 @@ disabled-by-default version over there.
 - **Never modify the user's audio files.** Read-only by default. Tag editing is
   opt-in, off by default, confirmed, and journalled for undo. Fetched artwork
   and lyrics go to the app's own cache, never into the music folders.
+  *On this branch* there is one exception to where files go, and none to
+  modifying them: a track the user explicitly saves from a link becomes a new
+  file under `Resonance Downloads` in a watched folder they chose, and never
+  lands on top of anything. `crates/mp-core/src/library/keep.rs` is the only
+  code that does it; keep it that way.
 - **Never ship a setting before the feature behind it works.** `main` once had
   five network settings that rendered real controls and were read by nothing;
   they were deleted in `03f240e` after the user asked how the Last.fm feature
@@ -105,7 +110,7 @@ this.
 ## Checks before any commit
 
 ```bash
-cargo test --workspace          # 1022 tests
+cargo test --workspace          # 1050 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all
 ```

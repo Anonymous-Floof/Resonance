@@ -117,6 +117,8 @@ impl NowPlaying {
 /// Not `Eq`: the skip boundaries are seconds, and seconds are floats.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamFacts {
+    /// The video it came from, which is what saving it asks for.
+    pub video_id: String,
     pub title: String,
     pub artist: String,
     pub album: Option<String>,

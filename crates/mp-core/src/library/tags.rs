@@ -1,7 +1,7 @@
 //! Reading and writing the tags inside a music file.
 //!
-//! This is the only code in Resonance that writes to the user's music, and it
-//! is built to be boring about it.
+//! This is the only code in Resonance that changes a file the user already
+//! has, and it is built to be boring about it.
 //!
 //! The rules it enforces, none of which the caller can opt out of:
 //!

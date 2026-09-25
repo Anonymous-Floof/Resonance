@@ -545,9 +545,10 @@ pub struct Privacy {
     /// one of Google's media servers rather than `youtube.com`.
     ///
     /// The audio is fetched to the app's own cache and played from there.
-    /// **Nothing is written to the music folders, and no library file is
-    /// touched.** The cache has a size ceiling and forgets the least recently
-    /// played first.
+    /// **Nothing is written to the music folders unless a track is saved**, and
+    /// then only as a new file in its own folder — see
+    /// [`Self::youtube_downloads_in`]. No library file is ever touched. The
+    /// cache has a size ceiling and forgets the oldest fetched first.
     ///
     /// No account is involved. Nothing identifying the user is sent, and no
     /// cookie or credential is ever passed to the program.
@@ -577,6 +578,18 @@ pub struct Privacy {
     /// whole point of showing it is that the user can go and check what they
     /// installed.
     pub yt_dlp_path: Option<PathBuf>,
+
+    /// Which watched folder saved tracks go into.
+    ///
+    /// Saving puts a track fetched from a link into a folder called
+    /// `Resonance Downloads` inside one of the watched folders, so that it
+    /// becomes part of the library without mingling with anything the user put
+    /// there themselves. `None` means the first watched folder, and so does a
+    /// folder that has since stopped being watched.
+    ///
+    /// Only ever new files: nothing already in the music folders is replaced,
+    /// renamed or modified, and a track is only saved when the user asks.
+    pub youtube_downloads_in: Option<PathBuf>,
 }
 
 impl Default for Privacy {
@@ -597,6 +610,8 @@ impl Default for Privacy {
             online_youtube_sponsorblock: false,
             // Look on PATH. Nothing is bundled and nothing is downloaded.
             yt_dlp_path: None,
+            // The first watched folder, until the user picks another.
+            youtube_downloads_in: None,
         }
     }
 }

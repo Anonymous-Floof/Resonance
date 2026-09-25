@@ -21,6 +21,10 @@ pub struct OpenUrl {
     text: String,
     /// Why the last attempt came to nothing, kept on screen until the next.
     problem: Option<String>,
+    /// Whether to save a copy of what is played. Remembered while the app is
+    /// open rather than cleared with the box, so a run of albums being saved
+    /// does not need the box ticked every time.
+    pub save: bool,
 }
 
 impl OpenUrl {
@@ -70,12 +74,16 @@ pub struct Outcome {
 /// it was opened from, which is what a link copied from the address bar
 /// mid-playlist looks like. Neither reading is safe to assume — one person
 /// wants the song, the next the whole mix — so both are offered.
+///
+/// `save_into` is where a saved copy would go, or `None` when there is no
+/// music folder to save into.
 pub fn show(
     ctx: &egui::Context,
     theme: &Theme,
     state: &mut OpenUrl,
     working: Option<&str>,
     names_both: bool,
+    save_into: Option<&std::path::Path>,
 ) -> Outcome {
     let mut outcome = Outcome::default();
 
@@ -110,7 +118,15 @@ pub fn show(
                 .inner_margin(egui::Margin::same(m.space(2.0) as i8)),
         )
         .show(ctx, |ui| {
-            body(ui, theme, state, working, names_both, &mut outcome);
+            body(
+                ui,
+                theme,
+                state,
+                working,
+                names_both,
+                save_into,
+                &mut outcome,
+            );
         });
 
     if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
@@ -126,6 +142,7 @@ fn body(
     state: &mut OpenUrl,
     working: Option<&str>,
     names_both: bool,
+    save_into: Option<&std::path::Path>,
     outcome: &mut Outcome,
 ) {
     let m = theme.metrics;
@@ -137,7 +154,7 @@ fn body(
             .color(col(p.text_primary)),
     );
     ui.label(
-        RichText::new("A YouTube or YouTube Music link to a video, a playlist, an album or a mix. The audio is fetched to this machine and played from there; nothing is added to your library and nothing is written to your music folders. A playlist starts once its first track is here, and each one after is fetched while the one before it plays.")
+        RichText::new("A YouTube or YouTube Music link to a video, a playlist, an album or a mix. The audio is fetched to this machine and played from there, and nothing is added to your library unless you ask for a copy below. A playlist starts once its first track is here, and each one after is fetched while the one before it plays.")
             .text_style(TextStyle::Name("caption".into()))
             .color(col(p.text_muted)),
     );
@@ -188,6 +205,26 @@ fn body(
     }
 
     ui.add_space(m.space(1.5));
+
+    ui.add_space(m.space(1.0));
+    match save_into {
+        Some(folder) => {
+            ui.checkbox(&mut state.save, "Save a copy to my library")
+                .on_hover_text(format!(
+                    "Into {}. For a playlist, every track of it, in a folder named after it. Only new files are written; nothing already there is changed.",
+                    folder.display()
+                ));
+        }
+        None => {
+            ui.add_enabled(
+                false,
+                egui::Checkbox::new(&mut false, "Save a copy to my library"),
+            )
+            .on_disabled_hover_text(
+                "There is no music folder to save into. Add one under Settings, Library.",
+            );
+        }
+    }
 
     if names_both && !busy {
         ui.add_space(m.space(1.0));

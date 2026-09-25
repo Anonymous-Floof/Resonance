@@ -47,6 +47,8 @@ pub enum Icon {
     Collapse,
     /// The lyrics pane.
     Lyrics,
+    /// Save a fetched track into the library.
+    Download,
     /// Sort direction, ascending.
     SortAscending,
     /// Sort direction, descending.
@@ -90,6 +92,7 @@ impl Icon {
             Self::Expand => "Full screen",
             Self::Collapse => "Leave full screen",
             Self::Lyrics => "Lyrics",
+            Self::Download => "Save to Resonance Downloads",
             Self::SortAscending => "Ascending",
             Self::SortDescending => "Descending",
             Self::Minimize => "Minimise",
@@ -140,6 +143,7 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, thickness
         Icon::Expand => corners(painter, box_rect, stroke, true),
         Icon::Collapse => corners(painter, box_rect, stroke, false),
         Icon::Lyrics => lyrics(painter, box_rect, stroke),
+        Icon::Download => download(painter, box_rect, stroke),
         Icon::SortAscending => sort_arrow(painter, box_rect, stroke, color, true),
         Icon::SortDescending => sort_arrow(painter, box_rect, stroke, color, false),
 
@@ -523,6 +527,23 @@ fn mirror(value: f32, sign: f32) -> f32 {
 }
 
 /// Lines of text with a musical note beside them.
+/// An arrow down into a tray: the shape every platform uses for "keep this".
+fn download(painter: &Painter, r: Rect, stroke: Stroke) {
+    path(painter, r, &[(0.5, 0.12), (0.5, 0.64)], stroke);
+    path(
+        painter,
+        r,
+        &[(0.28, 0.42), (0.5, 0.64), (0.72, 0.42)],
+        stroke,
+    );
+    path(
+        painter,
+        r,
+        &[(0.14, 0.66), (0.14, 0.86), (0.86, 0.86), (0.86, 0.66)],
+        stroke,
+    );
+}
+
 fn lyrics(painter: &Painter, r: Rect, stroke: Stroke) {
     // Ragged line lengths, so it reads as verse rather than a paragraph.
     for (y, end) in [(0.26, 0.62), (0.44, 0.78), (0.62, 0.54), (0.80, 0.70)] {
@@ -616,6 +637,7 @@ mod tests {
             Icon::Visualizer,
             Icon::Search,
             Icon::Plus,
+            Icon::Download,
             Icon::ChevronLeft,
             Icon::ChevronRight,
             Icon::Minimize,

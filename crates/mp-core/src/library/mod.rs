@@ -18,6 +18,7 @@ pub mod duplicates;
 pub mod enrich;
 pub mod features;
 pub mod ingest;
+pub mod keep;
 pub mod lyrics;
 pub mod m3u;
 pub mod model;
