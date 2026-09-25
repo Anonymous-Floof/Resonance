@@ -6,6 +6,10 @@
 //! gets the picture. Only the third is an ordinary request; the first two are
 //! run by `yt-dlp`, for the reasons set out in [`crate::tool`].
 //!
+//! A playlist adds a fourth, [`Client::list`], which asks what is *in* one
+//! without fetching any of it. Each video is then fetched by the same three
+//! steps as a pasted one, when its turn comes rather than all at once.
+//!
 //! # Two decisions that shape everything here
 //!
 //! **The audio is fetched to a file and then played.** Not streamed. Symphonia
@@ -74,6 +78,23 @@ pub const MAX_AUDIO_BYTES: u64 = 256 * 1024 * 1024;
 
 /// How long resolving a link may take.
 pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// The most of a playlist that will be listed.
+///
+/// A mix has no natural end — one measured at several hundred entries — and
+/// nobody is going to hear the five-hundredth track of anything in one
+/// sitting. Listing is cheap, one run and no audio, so this is a guard on the
+/// size of the answer rather than on what gets fetched: that happens one
+/// track at a time regardless.
+pub const MAX_LISTED: usize = 500;
+
+/// Lists that belong to whoever is signed in, and so mean nothing to a program
+/// that never is: Liked videos, Watch Later, and YouTube Music's Liked Music.
+const ACCOUNT_LISTS: &[&str] = &["LL", "WL", "LM"];
+
+/// How a video that is still in a playlist but can no longer be watched is
+/// listed. It has an id and a title and nothing behind it.
+const UNWATCHABLE: &[&str] = &["[Private video]", "[Deleted video]", "[Unavailable video]"];
 
 /// How long fetching the audio may take.
 ///
@@ -146,9 +167,65 @@ impl Query {
             .and_then(leading_id)
     }
 
-    /// Whether this is worth asking about.
+    /// The playlist this names, if it names one.
+    ///
+    /// Held to the same standard as a video id — `A-Z a-z 0-9 _ -` and nothing
+    /// else — though not to a fixed length, because the kinds differ: `PL` for
+    /// an ordinary list, `OLAK5uy_` for an album, `RD` for a mix, `UU` for a
+    /// channel's uploads. Only links to YouTube count; a `list=` on some other
+    /// site's address is that site's business.
+    pub fn playlist_id(&self) -> Option<String> {
+        let path = after_host(&self.link)?;
+        let (_, query) = path.split_once('?')?;
+        let query = query.split('#').next().unwrap_or(query);
+
+        let id = query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("list="))?;
+
+        is_playlist_id(id).then(|| id.to_owned())
+    }
+
+    /// Whether this names one of the signed-in user's own lists, which cannot
+    /// be read without an account.
+    pub fn names_account_list(&self) -> bool {
+        self.playlist_id()
+            .is_some_and(|id| ACCOUNT_LISTS.contains(&id.as_str()))
+    }
+
+    /// The address to hand the program when listing, built from the ids alone.
+    ///
+    /// Rebuilt rather than passed through, so whatever else the pasted text
+    /// carried — tracking parameters, a timestamp, anything at all — goes no
+    /// further than this function.
+    ///
+    /// A mix is the awkward one: it is built around a video and the service
+    /// will not list it by itself, so the video has to come along. Where the
+    /// link does not carry one, the mix's own id usually does, as `RD`
+    /// followed by the video it started from.
+    pub fn playlist_link(&self) -> Option<String> {
+        let list = self.playlist_id()?;
+
+        if ACCOUNT_LISTS.contains(&list.as_str()) {
+            return None;
+        }
+
+        if let Some(seed) = list.strip_prefix("RD") {
+            let video = self
+                .video_id()
+                .or_else(|| is_video_id(seed).then(|| seed.to_owned()))?;
+            return Some(format!(
+                "https://www.youtube.com/watch?v={video}&list={list}"
+            ));
+        }
+
+        Some(format!("https://www.youtube.com/playlist?list={list}"))
+    }
+
+    /// Whether this is worth asking about: a video, or a playlist that can be
+    /// listed without an account.
     pub fn is_answerable(&self) -> bool {
-        self.video_id().is_some()
+        self.video_id().is_some() || self.playlist_link().is_some()
     }
 
     /// How this reads in the activity log, before anything is known about it.
@@ -169,6 +246,34 @@ fn is_video_id(text: &str) -> bool {
         && text
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn is_playlist_id(text: &str) -> bool {
+    (2..=64).contains(&text.len())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Everything after the host, for a link to YouTube and nothing else.
+///
+/// `youtu.be/abc?x` comes back as `abc?x` and `youtube.com/watch?x` as
+/// `watch?x`: the callers only ever want the query string, and both have one
+/// in the same place.
+fn after_host(link: &str) -> Option<&str> {
+    let rest = link
+        .strip_prefix("https://")
+        .or_else(|| link.strip_prefix("http://"))
+        .unwrap_or(link);
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+
+    if let Some(tail) = rest.strip_prefix("youtu.be/") {
+        return Some(tail);
+    }
+
+    let rest = rest.strip_prefix("music.").unwrap_or(rest);
+    let rest = rest.strip_prefix("m.").unwrap_or(rest);
+    rest.strip_prefix("youtube.com/")
 }
 
 /// The id at the front of `text`, up to whatever ends it.
@@ -222,6 +327,11 @@ pub enum Trouble {
     /// The video is private, removed, age-gated, or offers no audio this
     /// build can decode.
     Unavailable(String),
+    /// The playlist is private or gone, or nothing left in it can be watched.
+    NoList(String),
+    /// One of the user's own lists, which needs an account to read. Nothing
+    /// was run.
+    NeedsAccount,
     /// `yt-dlp` could not be run, or did not finish in time.
     Tooling(String),
     /// YouTube answered and refused.
@@ -241,7 +351,13 @@ impl Trouble {
     pub fn message(&self) -> String {
         match self {
             Self::NotALink => {
-                "That is not a link to a video this recognises. A YouTube or YouTube Music watch link, or a youtu.be one.".to_owned()
+                "That is not a link this recognises. A YouTube or YouTube Music link to a video or a playlist, or a youtu.be one.".to_owned()
+            }
+            Self::NoList(_) => {
+                "That playlist is not available, or nothing in it is - it may be private, or everything in it removed.".to_owned()
+            }
+            Self::NeedsAccount => {
+                "That is one of your own lists - Liked videos, Watch Later or Liked Music - and reading it needs your account. This build does not sign in to YouTube.".to_owned()
             }
             Self::Unavailable(_) => {
                 "That video is not available - it may be private, removed, age-restricted, or offer no audio this build can play.".to_owned()
@@ -260,7 +376,9 @@ impl Trouble {
     pub fn detail(&self) -> String {
         match self {
             Self::NotALink => "not a link to a video".to_owned(),
+            Self::NeedsAccount => "a list that needs an account".to_owned(),
             Self::Unavailable(said)
+            | Self::NoList(said)
             | Self::Tooling(said)
             | Self::Refused(said)
             | Self::Failed(said) => said.clone(),
@@ -273,11 +391,95 @@ impl Trouble {
     /// refusal is a real failure and should.
     fn as_error(&self) -> NetError {
         match self {
-            Self::NotALink | Self::Unavailable(_) => NetError::NotFound,
+            Self::NotALink | Self::NeedsAccount | Self::Unavailable(_) | Self::NoList(_) => {
+                NetError::NotFound
+            }
             Self::Tooling(said) | Self::Refused(said) | Self::Failed(said) => {
                 NetError::Transport(said.clone())
             }
         }
+    }
+}
+
+/// What is in a playlist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listing {
+    pub id: String,
+    pub title: String,
+    /// In the playlist's own order, with the unwatchable ones already gone.
+    pub entries: Vec<Listed>,
+}
+
+impl Listing {
+    /// Where a video sits in the list, for a link that named both.
+    pub fn position_of(&self, video_id: &str) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|entry| entry.video_id == video_id)
+    }
+}
+
+/// One video in a playlist, as far as the list says.
+///
+/// Thinner than [`Resolved`], and deliberately not one: the list is known
+/// before anything is fetched, and each entry is resolved properly when its
+/// turn comes. This is enough to say what is coming.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    pub video_id: String,
+    pub title: String,
+    pub artist: String,
+    pub duration: Option<Duration>,
+}
+
+/// What `--flat-playlist --dump-single-json` gives back.
+#[derive(Debug, Deserialize)]
+struct DumpedList {
+    id: Option<String>,
+    title: Option<String>,
+    #[serde(rename = "_type")]
+    kind: Option<String>,
+    /// `Option` per entry because a missing one should cost that entry, not
+    /// the whole list.
+    #[serde(default)]
+    entries: Vec<Option<DumpedEntry>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DumpedEntry {
+    id: Option<String>,
+    title: Option<String>,
+    channel: Option<String>,
+    uploader: Option<String>,
+    duration: Option<f64>,
+}
+
+impl DumpedEntry {
+    /// `None` for anything that cannot be fetched: an id that is not an id, or
+    /// a video that is still listed but has gone.
+    fn into_listed(self) -> Option<Listed> {
+        let video_id = self.id.filter(|id| is_video_id(id))?;
+        let title = self.title.filter(|text| !text.trim().is_empty())?;
+
+        if UNWATCHABLE.contains(&title.as_str()) {
+            return None;
+        }
+
+        let artist = self
+            .channel
+            .filter(|text| !text.trim().is_empty())
+            .or(self.uploader.filter(|text| !text.trim().is_empty()))
+            .unwrap_or_else(|| "Unknown Artist".to_owned());
+
+        Some(Listed {
+            video_id,
+            title,
+            artist,
+            duration: self
+                .duration
+                .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+                .map(Duration::from_secs_f64),
+        })
     }
 }
 
@@ -545,6 +747,158 @@ impl Client {
         );
 
         Ok(resolved)
+    }
+
+    /// Find out what is in a playlist, without fetching any of it.
+    ///
+    /// Never cached, unlike [`Self::resolve`]: a playlist is something people
+    /// add to, and a remembered list would quietly stop growing. Listing costs
+    /// one run and no audio, so asking again is cheap.
+    ///
+    /// **Blocks.** Background threads only.
+    pub fn list(&self, query: &Query) -> Result<Listing, Trouble> {
+        if query.names_account_list() {
+            return Err(Trouble::NeedsAccount);
+        }
+
+        let (Some(list_id), Some(link)) = (query.playlist_id(), query.playlist_link()) else {
+            return Err(Trouble::NotALink);
+        };
+
+        let subject = format!("the playlist {list_id}");
+        let ceiling = MAX_LISTED.to_string();
+
+        // `--flat-playlist` is what keeps this to one request: the list is read
+        // and nothing in it is visited. The same absences as everywhere else
+        // here — no cookie, no account.
+        let args = vec![
+            "--flat-playlist",
+            "--dump-single-json",
+            "--no-warnings",
+            "--playlist-end",
+            ceiling.as_str(),
+            link.as_str(),
+        ];
+
+        self.youtube_limiter.acquire();
+
+        let output = match self.runner.run(&args, RESOLVE_TIMEOUT) {
+            Ok(output) => output,
+            Err(err) => {
+                self.note(&err, &self.youtube_limiter);
+                self.log(
+                    &YOUTUBE,
+                    err.outcome(),
+                    subject,
+                    0,
+                    Some(err.to_string()),
+                    None,
+                );
+                return Err(Trouble::Tooling(err.to_string()));
+            }
+        };
+
+        if !output.succeeded() {
+            // What is true of a video is true of a list: gone is a miss, and a
+            // refusal is the program being behind.
+            let trouble = match interpret(&output) {
+                Trouble::Unavailable(said) => Trouble::NoList(said),
+                other => other,
+            };
+            let err = trouble.as_error();
+            self.note(&err, &self.youtube_limiter);
+            self.log(
+                &YOUTUBE,
+                err.outcome(),
+                subject,
+                0,
+                Some(trouble.detail()),
+                None,
+            );
+            return Err(trouble);
+        }
+
+        self.youtube_limiter.note_success();
+
+        let dumped: DumpedList = match serde_json::from_slice(&output.stdout) {
+            Ok(dumped) => dumped,
+            Err(err) => {
+                let err = NetError::Decode(err.to_string());
+                self.youtube_limiter.note_failure();
+                self.log(
+                    &YOUTUBE,
+                    err.outcome(),
+                    subject,
+                    output.stdout.len() as u64,
+                    Some(err.to_string()),
+                    None,
+                );
+                return Err(Trouble::Failed(err.to_string()));
+            }
+        };
+
+        if dumped.kind.as_deref() != Some("playlist") {
+            let said = "the link did not turn out to be a playlist".to_owned();
+            self.log(
+                &YOUTUBE,
+                Outcome::Failed,
+                subject,
+                output.stdout.len() as u64,
+                Some(said.clone()),
+                None,
+            );
+            return Err(Trouble::Failed(said));
+        }
+
+        let listed = dumped.entries.len();
+        let entries: Vec<Listed> = dumped
+            .entries
+            .into_iter()
+            .flatten()
+            .filter_map(DumpedEntry::into_listed)
+            .collect();
+
+        if entries.is_empty() {
+            let said = format!("{listed} listed, none of them watchable");
+            self.log(
+                &YOUTUBE,
+                Outcome::NotFound,
+                subject,
+                output.stdout.len() as u64,
+                Some(said.clone()),
+                None,
+            );
+            return Err(Trouble::NoList(said));
+        }
+
+        let listing = Listing {
+            id: dumped.id.unwrap_or(list_id),
+            title: dumped
+                .title
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or_else(|| "Untitled playlist".to_owned()),
+            entries,
+        };
+
+        // The count left out is worth a line of its own: a list of forty that
+        // plays thirty-one looks like a fault unless something says why.
+        let dropped = listed - listing.entries.len();
+        let detail = (dropped > 0).then(|| format!("{dropped} no longer watchable, left out"));
+
+        self.log(
+            &YOUTUBE,
+            Outcome::Ok,
+            format!(
+                "playlist \"{}\" of {} videos",
+                listing.title,
+                listing.entries.len()
+            ),
+            output.stdout.len() as u64,
+            detail,
+            None,
+        );
+
+        Ok(listing)
     }
 
     /// Get the audio itself, into the cache directory.
@@ -1504,5 +1858,318 @@ mod tests {
         assert_eq!(host_of("not a url"), None);
         assert_eq!(host_of(""), None);
         assert_eq!(host_of("https://"), None);
+    }
+    // -- playlists ------------------------------------------------------------
+
+    const LIST: &str = "PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI";
+
+    #[test]
+    fn every_shape_of_playlist_link_names_the_same_list() {
+        let links = [
+            format!("https://www.youtube.com/playlist?list={LIST}"),
+            format!("https://youtube.com/playlist?list={LIST}&si=tracking"),
+            format!("https://m.youtube.com/playlist?list={LIST}"),
+            format!("https://music.youtube.com/playlist?list={LIST}"),
+            format!("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list={LIST}&index=3"),
+            format!("https://youtu.be/dQw4w9WgXcQ?list={LIST}"),
+            format!("youtube.com/playlist?list={LIST}#comments"),
+        ];
+
+        for link in &links {
+            assert_eq!(
+                Query::new(link.as_str()).playlist_id().as_deref(),
+                Some(LIST),
+                "{link}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_link_with_no_list_names_no_playlist() {
+        for link in [
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtu.be/dQw4w9WgXcQ",
+            "dQw4w9WgXcQ",
+            "https://www.youtube.com/playlist?list=",
+        ] {
+            assert_eq!(Query::new(link).playlist_id(), None, "{link}");
+        }
+    }
+
+    /// The same boundary a video id has. Whatever does not look like an id is
+    /// not an id, and so never reaches the program; whatever does is only ever
+    /// placed inside an address this builds, never passed as an argument of
+    /// its own, so even `--exec` arrives as part of a URL.
+    #[test]
+    fn a_playlist_id_is_safe_characters_only() {
+        for list in ["PL%20evil", "PL;rm", "PL rm", "P", "PL\u{e9}"] {
+            let query = Query::new(format!("https://www.youtube.com/playlist?list={list}"));
+            assert_eq!(query.playlist_id(), None, "{list}");
+            assert!(!query.is_answerable(), "{list}");
+        }
+
+        let odd = Query::new("https://www.youtube.com/playlist?list=--exec");
+        assert!(odd.playlist_link().unwrap().starts_with("https://"));
+    }
+
+    #[test]
+    fn a_list_on_some_other_site_is_not_a_playlist() {
+        let query = Query::new(format!("https://example.com/watch?list={LIST}"));
+
+        assert_eq!(query.playlist_id(), None);
+        assert!(!query.is_answerable());
+    }
+
+    /// What reaches the program is built from the id, so nothing else the
+    /// pasted text carried goes with it.
+    #[test]
+    fn the_link_handed_over_is_rebuilt_from_the_id() {
+        let query = Query::new(format!(
+            "https://music.youtube.com/playlist?list={LIST}&si=abc123&feature=share"
+        ));
+
+        assert_eq!(
+            query.playlist_link().as_deref(),
+            Some(format!("https://www.youtube.com/playlist?list={LIST}").as_str())
+        );
+    }
+
+    #[test]
+    fn a_mix_keeps_the_video_it_was_built_around() {
+        let from_the_link =
+            Query::new("https://www.youtube.com/watch?v=yPYZpwSpKmA&list=RDdQw4w9WgXcQ");
+        assert_eq!(
+            from_the_link.playlist_link().as_deref(),
+            Some("https://www.youtube.com/watch?v=yPYZpwSpKmA&list=RDdQw4w9WgXcQ")
+        );
+
+        // With no video in the link, the mix's own id names its seed.
+        let from_the_id = Query::new("https://www.youtube.com/playlist?list=RDdQw4w9WgXcQ");
+        assert_eq!(
+            from_the_id.playlist_link().as_deref(),
+            Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ")
+        );
+    }
+
+    /// Listed on its own the service calls a mix "unviewable", so one with no
+    /// video to hang it on is not a link worth asking about.
+    #[test]
+    fn a_mix_with_nothing_to_build_it_around_is_not_asked_about() {
+        let query =
+            Query::new("https://music.youtube.com/playlist?list=RDCLAK5uy_kmPRjHDECIcuVwnKsx");
+
+        assert!(query.playlist_id().is_some());
+        assert_eq!(query.playlist_link(), None);
+        assert!(!query.is_answerable());
+    }
+
+    #[test]
+    fn the_users_own_lists_are_recognised_and_not_asked_about() {
+        for list in ["LL", "WL", "LM"] {
+            let query = Query::new(format!("https://www.youtube.com/playlist?list={list}"));
+
+            assert!(query.names_account_list(), "{list}");
+            assert_eq!(query.playlist_link(), None, "{list}");
+            assert!(!query.is_answerable(), "{list}");
+        }
+
+        // A video watched from inside one is still a video.
+        let watched = Query::new("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=WL");
+        assert!(watched.is_answerable());
+        assert_eq!(watched.video_id().as_deref(), Some("dQw4w9WgXcQ"));
+    }
+
+    const LISTED: &str = r#"{
+        "_type": "playlist",
+        "id": "PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI",
+        "title": "Road trip",
+        "entries": [
+            {"_type": "url", "id": "dQw4w9WgXcQ", "title": "Never Gonna Give You Up", "channel": "Rick Astley", "duration": 213},
+            {"_type": "url", "id": "xxxxxxxxxxx", "title": "[Private video]", "duration": null},
+            {"_type": "url", "id": "yPYZpwSpKmA", "title": "Together Forever", "uploader": "Rick Astley", "duration": 204.5},
+            {"_type": "url", "id": "not-an-id", "title": "Something odd"},
+            null,
+            {"_type": "url", "id": "zzzzzzzzzzz", "title": "[Deleted video]"},
+            {"_type": "url", "id": "djV11Xbc914", "title": "Take On Me"}
+        ]
+    }"#;
+
+    fn playlist() -> Query {
+        Query::new(format!("https://www.youtube.com/playlist?list={LIST}"))
+    }
+
+    #[test]
+    fn a_list_keeps_its_order_and_drops_what_cannot_be_watched() {
+        let harness = harness(vec![Ok(ran(LISTED))], vec![]);
+
+        let listing = harness.client.list(&playlist()).expect("a listing");
+
+        assert_eq!(listing.title, "Road trip");
+        let ids: Vec<&str> = listing
+            .entries
+            .iter()
+            .map(|entry| entry.video_id.as_str())
+            .collect();
+        assert_eq!(ids, ["dQw4w9WgXcQ", "yPYZpwSpKmA", "djV11Xbc914"]);
+
+        assert_eq!(listing.entries[0].artist, "Rick Astley");
+        assert_eq!(listing.entries[1].artist, "Rick Astley");
+        assert_eq!(listing.entries[2].artist, "Unknown Artist");
+        assert_eq!(
+            listing.entries[1].duration,
+            Some(Duration::from_secs_f64(204.5))
+        );
+        assert_eq!(listing.entries[2].duration, None);
+    }
+
+    #[test]
+    fn a_video_named_alongside_the_list_can_be_found_in_it() {
+        let harness = harness(vec![Ok(ran(LISTED))], vec![]);
+        let listing = harness.client.list(&playlist()).expect("a listing");
+
+        assert_eq!(listing.position_of("yPYZpwSpKmA"), Some(1));
+        assert_eq!(listing.position_of("aaaaaaaaaaa"), None);
+    }
+
+    /// Listing is one run and no audio: nothing in the list is visited, no
+    /// account is involved, and the size of the answer has a ceiling.
+    #[test]
+    fn listing_is_flat_capped_and_never_touches_an_account() {
+        let harness = harness(vec![Ok(ran(LISTED))], vec![]);
+        harness.client.list(&playlist()).expect("a listing");
+
+        let calls = harness.runner.calls();
+        assert_eq!(calls.len(), 1);
+        let args = &calls[0];
+
+        assert!(args.contains(&"--flat-playlist".to_owned()));
+        let at = args.iter().position(|arg| arg == "--playlist-end").unwrap();
+        assert_eq!(args[at + 1], MAX_LISTED.to_string());
+        assert_eq!(
+            args.last().unwrap(),
+            &format!("https://www.youtube.com/playlist?list={LIST}")
+        );
+
+        for arg in args {
+            assert!(!arg.contains("cookie"), "{arg}");
+            assert!(!arg.contains("username"), "{arg}");
+            assert!(!arg.contains("netrc"), "{arg}");
+        }
+    }
+
+    /// A playlist grows. A remembered one would quietly stop.
+    #[test]
+    fn a_list_is_asked_for_fresh_every_time() {
+        let harness = harness(vec![Ok(ran(LISTED)), Ok(ran(LISTED))], vec![]);
+
+        harness.client.list(&playlist()).expect("a listing");
+        harness.client.list(&playlist()).expect("a listing");
+
+        assert_eq!(harness.runner.calls().len(), 2);
+    }
+
+    #[test]
+    fn the_log_says_how_many_and_how_many_were_left_out() {
+        let harness = harness(vec![Ok(ran(LISTED))], vec![]);
+        harness.client.list(&playlist()).expect("a listing");
+
+        let recent = harness.activity.recent();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].outcome, Outcome::Ok);
+        assert!(
+            recent[0].subject.contains("Road trip"),
+            "{}",
+            recent[0].subject
+        );
+        assert!(
+            recent[0].subject.contains("3 videos"),
+            "{}",
+            recent[0].subject
+        );
+        assert!(
+            recent[0]
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("4 no longer watchable")),
+            "{:?}",
+            recent[0].detail
+        );
+    }
+
+    #[test]
+    fn a_list_with_nothing_watchable_is_a_miss() {
+        let harness = harness(
+            vec![Ok(ran(
+                r#"{"_type": "playlist", "id": "PLx", "title": "Gone", "entries": [{"id": "xxxxxxxxxxx", "title": "[Private video]"}]}"#,
+            ))],
+            vec![],
+        );
+
+        let trouble = harness.client.list(&playlist()).unwrap_err();
+
+        assert!(matches!(trouble, Trouble::NoList(_)), "{trouble:?}");
+        assert_eq!(harness.activity.recent()[0].outcome, Outcome::NotFound);
+    }
+
+    #[test]
+    fn a_list_that_is_gone_says_so_as_a_list() {
+        let harness = harness(
+            vec![Ok(failed(
+                "ERROR: [youtube:tab] PLx: The playlist does not exist.",
+            ))],
+            vec![],
+        );
+
+        let trouble = harness.client.list(&playlist()).unwrap_err();
+
+        assert!(matches!(trouble, Trouble::NoList(_)), "{trouble:?}");
+        assert!(trouble.message().contains("playlist"));
+    }
+
+    #[test]
+    fn a_refused_list_blames_the_program() {
+        let harness = harness(vec![Ok(failed("ERROR: HTTP Error 403: Forbidden"))], vec![]);
+
+        let trouble = harness.client.list(&playlist()).unwrap_err();
+
+        assert!(matches!(trouble, Trouble::Refused(_)), "{trouble:?}");
+        assert_eq!(harness.activity.recent()[0].outcome, Outcome::Failed);
+    }
+
+    #[test]
+    fn a_single_video_where_a_list_was_expected_is_not_a_list() {
+        let harness = harness(vec![Ok(ran(DUMP))], vec![]);
+
+        let trouble = harness.client.list(&playlist()).unwrap_err();
+
+        assert!(matches!(trouble, Trouble::Failed(_)), "{trouble:?}");
+    }
+
+    #[test]
+    fn an_account_list_runs_nothing_and_says_why() {
+        let harness = harness(vec![], vec![]);
+
+        let trouble = harness
+            .client
+            .list(&Query::new("https://www.youtube.com/playlist?list=LL"))
+            .unwrap_err();
+
+        assert_eq!(trouble, Trouble::NeedsAccount);
+        assert!(trouble.message().contains("account"));
+        assert!(harness.runner.calls().is_empty());
+        assert!(harness.activity.recent().is_empty());
+    }
+
+    #[test]
+    fn a_link_with_no_list_runs_nothing() {
+        let harness = harness(vec![], vec![]);
+
+        let trouble = harness
+            .client
+            .list(&Query::new("https://youtu.be/dQw4w9WgXcQ"))
+            .unwrap_err();
+
+        assert_eq!(trouble, Trouble::NotALink);
+        assert!(harness.runner.calls().is_empty());
     }
 }

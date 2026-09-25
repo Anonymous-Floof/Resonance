@@ -9,10 +9,14 @@
 //! ```bash
 //! cargo run -p mp-net --example youtube_probe -- "https://youtu.be/jNQXAC9IVRw"
 //! cargo run -p mp-net --example youtube_probe -- --fetch "https://youtu.be/jNQXAC9IVRw"
+//! cargo run -p mp-net --example youtube_probe -- --list "https://www.youtube.com/playlist?list=..."
 //! ```
 //!
 //! Without `--fetch` nothing is downloaded but the metadata, which is the
 //! quickest way to tell a link this build cannot use from one it can.
+//!
+//! `--list` reads what is in a playlist and fetches none of it. A link naming
+//! a playlist and no video is listed without being asked.
 
 use std::sync::Arc;
 
@@ -23,19 +27,29 @@ use mp_net::youtube::{Client, Query};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let fetch = args.iter().any(|arg| arg == "--fetch");
+    let list = args.iter().any(|arg| arg == "--list");
 
     let Some(link) = args.iter().find(|arg| !arg.starts_with("--")) else {
-        eprintln!("usage: youtube_probe [--fetch] <link>");
+        eprintln!("usage: youtube_probe [--fetch | --list] <link>");
         std::process::exit(2);
     };
 
     let query = Query::new(link.clone());
 
-    let Some(video_id) = query.video_id() else {
-        eprintln!("that is not a link to a video this recognises: {link}");
-        eprintln!("a link is never handed to yt-dlp unless it names a video, so this stops here.");
+    let listing = query.playlist_link().is_some() && (list || query.video_id().is_none());
+
+    if query.names_account_list() {
+        eprintln!("that is one of the signed-in user's own lists, which needs an account: {link}");
         std::process::exit(1);
-    };
+    }
+
+    if !listing && query.video_id().is_none() {
+        eprintln!("that is not a link this recognises: {link}");
+        eprintln!(
+            "a link is never handed to yt-dlp unless it names a video or a playlist, so this stops here."
+        );
+        std::process::exit(1);
+    }
 
     let Some(tool) = YtDlp::locate(None) else {
         eprintln!("yt-dlp is not on PATH. It is not bundled and never downloaded;");
@@ -48,7 +62,12 @@ fn main() {
         "version:  {}",
         tool.version().as_deref().unwrap_or("(it would not say)")
     );
-    println!("video:    {video_id}");
+    if listing {
+        println!("playlist: {}", query.playlist_id().unwrap_or_default());
+        println!("asks for: {}", query.playlist_link().unwrap_or_default());
+    } else {
+        println!("video:    {}", query.video_id().unwrap_or_default());
+    }
     println!();
 
     // A scratch cache that removes itself, so the probe never leaves anything
@@ -62,7 +81,54 @@ fn main() {
         Arc::clone(&activity),
     );
 
-    match client.resolve(&query) {
+    if listing {
+        match client.list(&query) {
+            Ok(found) => {
+                println!("  title:     {}", found.title);
+                println!("  videos:    {}", found.entries.len());
+                if let Some(at) = query.video_id().and_then(|id| found.position_of(&id)) {
+                    println!("  starts at: {}", at + 1);
+                }
+                println!();
+                for (number, entry) in found.entries.iter().enumerate().take(10) {
+                    println!(
+                        "  {:>3}. {} {:<40} {}",
+                        number + 1,
+                        entry.video_id,
+                        entry.title.chars().take(40).collect::<String>(),
+                        entry.artist
+                    );
+                }
+                if found.entries.len() > 10 {
+                    println!("  ... and {} more", found.entries.len() - 10);
+                }
+            }
+            Err(trouble) => {
+                println!("  nothing came back: {}", trouble.detail());
+                println!("  means:             {}", trouble.message());
+            }
+        }
+    } else {
+        probe_video(&client, &query, fetch);
+    }
+
+    println!();
+    for entry in activity.recent() {
+        println!(
+            "log: {:<18} {:<34} {:<10} {:>9} bytes  {}  {}",
+            entry.source,
+            entry.host,
+            entry.outcome.as_str(),
+            entry.bytes,
+            entry.subject,
+            entry.detail.as_deref().unwrap_or("")
+        );
+    }
+}
+
+/// Resolve one video, and fetch it if asked.
+fn probe_video(client: &Client, query: &Query, fetch: bool) {
+    match client.resolve(query) {
         Ok(resolved) => {
             println!("  title:     {}", resolved.title);
             println!("  artist:    {}", resolved.artist);
@@ -98,18 +164,6 @@ fn main() {
             println!("  nothing came back: {}", trouble.detail());
             println!("  means:             {}", trouble.message());
         }
-    }
-
-    println!();
-    for entry in activity.recent() {
-        println!(
-            "log: {:<18} {:<34} {:<10} {:>9} bytes  {}",
-            entry.source,
-            entry.host,
-            entry.outcome.as_str(),
-            entry.bytes,
-            entry.detail.as_deref().unwrap_or("")
-        );
     }
 }
 

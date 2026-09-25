@@ -318,7 +318,9 @@ impl YoutubeJob {
         }
 
         let query = Query::new(link);
-        if !query.is_answerable() {
+        // A video only, for now: `is_answerable` also accepts a playlist, and
+        // nothing here can play one yet.
+        if query.video_id().is_none() {
             return false;
         }
 

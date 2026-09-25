@@ -621,7 +621,7 @@ scripted fake. **No test in the workspace opens a socket.**
 ## Tests
 
 ```bash
-cargo test --workspace          # 971 tests
+cargo test --workspace          # 990 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```
@@ -708,8 +708,9 @@ cargo run -p mp-net --example youtube_probe -- "https://youtu.be/jNQXAC9IVRw"
 ```
 Resolves one link and prints what came back, which yt-dlp it used and what
 version, and the log lines it produced. Add `--fetch` to download the audio as
-well and report what container it turned out to be. **This one uses the network
-and runs yt-dlp.**
+well and report what container it turned out to be. Given a playlist, album or
+mix link — or any link with `--list` — it reads what is in the list instead,
+and fetches none of it. **This one uses the network and runs yt-dlp.**
 
 The unit tests answer from a scripted fake, which proves the parsing and proves
 nothing about whether yt-dlp still reports the fields this expects — and that
