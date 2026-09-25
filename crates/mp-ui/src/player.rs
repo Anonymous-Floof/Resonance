@@ -501,6 +501,26 @@ impl Player {
         self.play(vec![path], 0);
     }
 
+    /// Add a fetched track behind whatever is playing — the next track of a
+    /// playlist, made ready while the current one plays.
+    pub fn enqueue_stream(&mut self, path: PathBuf, facts: StreamFacts) {
+        self.stream_facts.insert(path.clone(), facts);
+        self.enqueue(vec![path]);
+    }
+
+    /// What is known about a fetched track, or `None` for anything else.
+    ///
+    /// The queue panel asks, because a fetched file is named after its video
+    /// id and is never in the library to be looked up.
+    pub fn stream_facts(&self, path: &Path) -> Option<&StreamFacts> {
+        self.stream_facts.get(path)
+    }
+
+    /// Whether a path is anywhere in the queue, played or not.
+    pub fn is_queued(&self, path: &Path) -> bool {
+        self.queue.iter().any(|entry| entry.path == path)
+    }
+
     /// Skip past anything in the current track that is not the song.
     ///
     /// Driven from the frame rather than scheduled inside the engine, which

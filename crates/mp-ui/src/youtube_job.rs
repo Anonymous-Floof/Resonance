@@ -12,6 +12,11 @@
 //! waiting for that link, and a queue of half-finished downloads would be
 //! worse than a short wait with an honest label on it.
 //!
+//! A playlist does not change that. Reading the list is one job, and each
+//! track is a job of its own, asked for by the caller one track ahead of what
+//! is playing — see `link_queue`. The worker never knows it is working
+//! through a list, which is what keeps it this simple.
+//!
 //! ## The repaint is the part that is easy to get wrong
 //!
 //! egui only draws when something asks it to, so a window sitting idle
@@ -29,7 +34,7 @@ use mp_core::library::names;
 use mp_net::Activity;
 use mp_net::sponsorblock;
 use mp_net::tool::YtDlp;
-use mp_net::youtube::{Client, Query, Resolved};
+use mp_net::youtube::{Client, Listing, Query, Resolved, Trouble};
 
 use crate::player::StreamFacts;
 
@@ -144,6 +149,7 @@ pub enum Stage {
     Idle,
     Resolving,
     Fetching,
+    Listing,
 }
 
 impl Stage {
@@ -151,6 +157,7 @@ impl Stage {
         match code {
             1 => Self::Resolving,
             2 => Self::Fetching,
+            3 => Self::Listing,
             _ => Self::Idle,
         }
     }
@@ -160,6 +167,7 @@ impl Stage {
             Self::Idle => 0,
             Self::Resolving => 1,
             Self::Fetching => 2,
+            Self::Listing => 3,
         }
     }
 
@@ -169,9 +177,21 @@ impl Stage {
             Self::Idle => None,
             Self::Resolving => Some("Looking up the link"),
             Self::Fetching => Some("Fetching the audio"),
+            Self::Listing => Some("Reading the playlist"),
         }
     }
 }
+
+/// What to say while the next track of a playlist is being made ready.
+///
+/// Its own label because it is not what the user asked for just now: a box
+/// opened while it runs should say the wait is for the playlist, not suggest
+/// the new link has already been taken.
+pub const GETTING_NEXT_READY: &str = "Getting the next track in the playlist ready";
+
+/// Why a link could not be sent at all, when something is already running.
+pub const BUSY: &str =
+    "Something is already being fetched. The box will take a link again as soon as it finishes.";
 
 /// What came back.
 #[derive(Debug, Clone, PartialEq)]
@@ -181,18 +201,47 @@ pub enum Answer {
         path: PathBuf,
         facts: Box<StreamFacts>,
     },
+    /// What is in a playlist. Nothing in it has been fetched.
+    Listed {
+        listing: Box<Listing>,
+        /// The video the link named alongside the list, to start from.
+        start_at: Option<String>,
+    },
     /// Nothing playable, and why not in words the user can act on.
-    Nothing { why: String },
+    Nothing {
+        why: String,
+        /// Whether the reason is the program rather than the video, so that
+        /// a playlist should stop instead of trying the next track.
+        blocks_the_rest: bool,
+    },
 }
 
-/// One link, and what the user asked for while it was pasted.
+/// An answer, and whom it is for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reply {
+    pub answer: Answer,
+    /// Whether this was the next track of a playlist rather than something
+    /// the user pasted. Such an answer can outlive its list - the user played
+    /// something else while it was being fetched - and must then be dropped,
+    /// never mistaken for a link that has just been asked for.
+    pub for_a_list: bool,
+}
+
+/// What the worker is asked to do.
 ///
-/// The preference travels with the job rather than being read on the worker,
-/// so a link already in flight finishes under the setting it was sent with.
+/// Preferences travel with the job rather than being read on the worker, so a
+/// link already in flight finishes under the setting it was sent with.
 #[derive(Debug, Clone)]
-struct Job {
-    query: Query,
-    skip_segments: bool,
+enum Job {
+    /// One video: resolve it, fetch it, and find its picture and segments.
+    Video {
+        query: Query,
+        skip_segments: bool,
+        /// An album name the list knew and the video may not.
+        album: Option<String>,
+    },
+    /// What is in a playlist, and nothing more.
+    List { query: Query },
 }
 
 /// A worker thread that turns links into files.
@@ -203,6 +252,9 @@ pub struct YoutubeJob {
     /// Set while something is in flight, so a second paste does not queue up
     /// behind the first without saying so.
     busy: bool,
+    /// Whether what is in flight is the next track of a playlist rather than
+    /// something the user has just asked for.
+    background: bool,
 }
 
 impl std::fmt::Debug for YoutubeJob {
@@ -210,6 +262,7 @@ impl std::fmt::Debug for YoutubeJob {
         f.debug_struct("YoutubeJob")
             .field("stage", &self.stage())
             .field("busy", &self.busy)
+            .field("background", &self.background)
             .finish()
     }
 }
@@ -281,6 +334,7 @@ impl YoutubeJob {
             answers,
             stage,
             busy: false,
+            background: false,
         })
     }
 
@@ -303,52 +357,81 @@ impl YoutubeJob {
             return None;
         }
 
+        if self.background {
+            return Some(GETTING_NEXT_READY);
+        }
+
         Some(working_label(self.stage()))
     }
 
-    /// Ask for a link.
+    /// Ask for a link the user has just given.
     ///
-    /// `false` when it will not be tried: something is already in flight, or
-    /// the text does not name a video. A link that names nothing is refused
-    /// here rather than sent, so nothing unrecognised is ever handed to the
-    /// program.
-    pub fn want(&mut self, link: &str, skip_segments: bool) -> bool {
+    /// A link naming both a video and a playlist is the playlist when
+    /// `whole_list` is set and the video otherwise; one naming only one of them
+    /// is that. The error is a sentence for the user. A link that names
+    /// nothing is refused here rather than sent, so nothing unrecognised is
+    /// ever handed to the program.
+    pub fn want(
+        &mut self,
+        link: &str,
+        skip_segments: bool,
+        whole_list: bool,
+    ) -> Result<(), String> {
+        if self.busy {
+            return Err(BUSY.to_owned());
+        }
+
+        let job = job_for(Query::new(link), skip_segments, whole_list)?;
+        self.send(job, false)
+    }
+
+    /// Fetch one video of a playlist that is already playing.
+    ///
+    /// `false` when something is in flight; the caller asks again later.
+    pub fn fetch_listed(
+        &mut self,
+        video_id: &str,
+        skip_segments: bool,
+        album: Option<String>,
+    ) -> bool {
         if self.busy {
             return false;
         }
 
-        let query = Query::new(link);
-        // A video only, for now: `is_answerable` also accepts a playlist, and
-        // nothing here can play one yet.
-        if query.video_id().is_none() {
-            return false;
-        }
-
-        let job = Job {
-            query,
+        let job = Job::Video {
+            query: Query::new(video_id),
             skip_segments,
+            album,
         };
 
+        self.send(job, true).is_ok()
+    }
+
+    fn send(&mut self, job: Job, background: bool) -> Result<(), String> {
         if self.jobs.send(job).is_err() {
-            return false;
+            return Err("The link worker has stopped. Switching Play from a link off and on again starts it afresh.".to_owned());
         }
 
         self.busy = true;
-        true
+        self.background = background;
+        Ok(())
     }
 
     /// Take whatever has landed.
-    pub fn poll(&mut self) -> Option<Answer> {
+    pub fn poll(&mut self) -> Option<Reply> {
         match self.answers.try_recv() {
             Ok(answer) => {
+                let for_a_list = self.background;
                 self.busy = false;
-                Some(answer)
+                self.background = false;
+                Some(Reply { answer, for_a_list })
             }
             Err(TryRecvError::Empty) => None,
             Err(TryRecvError::Disconnected) => {
                 // The worker is gone, so nothing is coming. Clearing this is
                 // what stops the interface waiting forever on a dead thread.
                 self.busy = false;
+                self.background = false;
                 None
             }
         }
@@ -365,7 +448,42 @@ fn working_label(stage: Stage) -> &'static str {
     stage.label().unwrap_or("Working")
 }
 
-/// One link, start to finish.
+/// Which job a pasted link is.
+///
+/// Apart from [`YoutubeJob::want`] so the choice can be tested without a
+/// thread. The one decision in it that is not obvious: a link to a video
+/// inside one of the user's own lists — Watch Later, say — is the video,
+/// because the list cannot be read and the video can.
+fn job_for(query: Query, skip_segments: bool, whole_list: bool) -> Result<Job, String> {
+    let has_video = query.video_id().is_some();
+    let has_list = query.playlist_link().is_some();
+
+    if has_list && (whole_list || !has_video) {
+        return Ok(Job::List { query });
+    }
+
+    if has_video {
+        return Ok(Job::Video {
+            query,
+            skip_segments,
+            album: None,
+        });
+    }
+
+    if query.names_account_list() {
+        return Err(Trouble::NeedsAccount.message());
+    }
+
+    Err(Trouble::NotALink.message())
+}
+
+/// Whether a failure is about the program rather than the video, so that
+/// working through the rest of a playlist would only fail the same way.
+fn blocks_the_rest(trouble: &Trouble) -> bool {
+    matches!(trouble, Trouble::Refused(_) | Trouble::Tooling(_))
+}
+
+/// One job, start to finish.
 #[allow(clippy::too_many_arguments)]
 fn run(
     client: &Client,
@@ -376,10 +494,60 @@ fn run(
     stage: &AtomicU8,
     ctx: &egui::Context,
 ) -> Answer {
+    match job {
+        Job::List { query } => list(client, query, stage, ctx),
+        Job::Video {
+            query,
+            skip_segments,
+            album,
+        } => video(
+            client,
+            segments,
+            art,
+            audio_dir,
+            query,
+            *skip_segments,
+            album.as_deref(),
+            stage,
+            ctx,
+        ),
+    }
+}
+
+/// What is in a playlist.
+fn list(client: &Client, query: &Query, stage: &AtomicU8, ctx: &egui::Context) -> Answer {
+    stage.store(Stage::Listing.code(), Ordering::Relaxed);
+    ctx.request_repaint();
+
+    match client.list(query) {
+        Ok(listing) => Answer::Listed {
+            listing: Box::new(listing),
+            start_at: query.video_id(),
+        },
+        Err(trouble) => Answer::Nothing {
+            why: trouble.message(),
+            blocks_the_rest: blocks_the_rest(&trouble),
+        },
+    }
+}
+
+/// One video, start to finish.
+#[allow(clippy::too_many_arguments)]
+fn video(
+    client: &Client,
+    segments: &sponsorblock::Client,
+    art: &ArtCache,
+    audio_dir: &Path,
+    query: &Query,
+    skip_segments: bool,
+    album: Option<&str>,
+    stage: &AtomicU8,
+    ctx: &egui::Context,
+) -> Answer {
     stage.store(Stage::Resolving.code(), Ordering::Relaxed);
     ctx.request_repaint();
 
-    let resolved = match client.resolve(&job.query) {
+    let resolved = match client.resolve(query) {
         Ok(resolved) => resolved,
         // The reason travels with the failure now. Saying only that
         // nothing happened sent people hunting through the log for a line
@@ -387,6 +555,7 @@ fn run(
         Err(trouble) => {
             return Answer::Nothing {
                 why: trouble.message(),
+                blocks_the_rest: blocks_the_rest(&trouble),
             };
         }
     };
@@ -402,6 +571,7 @@ fn run(
             // a comma reads worse than a full stop does.
             return Answer::Nothing {
                 why: format!("Found {:?}. {}", resolved.title, trouble.message()),
+                blocks_the_rest: blocks_the_rest(&trouble),
             };
         }
     };
@@ -421,7 +591,7 @@ fn run(
 
     // Asked for last, and never a reason to fail: a track with nothing
     // skipped still plays. Only asked at all when the user said so.
-    let skips = if job.skip_segments {
+    let skips = if skip_segments {
         segments
             .fetch(&sponsorblock::Query::new(&resolved.video_id))
             .unwrap_or_default()
@@ -436,9 +606,17 @@ fn run(
     // already on disk and counted.
     sweep(audio_dir, CACHE_BUDGET, &audio.path);
 
+    let mut facts = facts_from(&resolved, art_id, skips);
+
+    // The service's own answer wins where it has one; a list that is an album
+    // fills the gap an ordinary upload leaves.
+    if facts.album.is_none() {
+        facts.album = album.map(str::to_owned);
+    }
+
     Answer::Ready {
         path: audio.path,
-        facts: Box::new(facts_from(&resolved, art_id, skips)),
+        facts: Box::new(facts),
     }
 }
 
@@ -810,12 +988,90 @@ mod tests {
         assert_eq!(Stage::Idle.label(), None);
         assert!(Stage::Resolving.label().is_some());
         assert!(Stage::Fetching.label().is_some());
+        assert!(Stage::Listing.label().is_some());
     }
 
     #[test]
     fn a_stage_survives_the_trip_through_an_atomic() {
-        for stage in [Stage::Idle, Stage::Resolving, Stage::Fetching] {
+        for stage in [
+            Stage::Idle,
+            Stage::Resolving,
+            Stage::Fetching,
+            Stage::Listing,
+        ] {
             assert_eq!(Stage::from_code(stage.code()), stage);
         }
+    }
+
+    // -- which job a link is ----------------------------------------------------
+
+    const BOTH: &str =
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI";
+
+    fn is_list(job: &Result<Job, String>) -> bool {
+        matches!(job, Ok(Job::List { .. }))
+    }
+
+    fn is_video(job: &Result<Job, String>) -> bool {
+        matches!(job, Ok(Job::Video { .. }))
+    }
+
+    #[test]
+    fn a_link_naming_both_is_whichever_was_asked_for() {
+        assert!(is_list(&job_for(Query::new(BOTH), false, true)));
+        assert!(is_video(&job_for(Query::new(BOTH), false, false)));
+    }
+
+    #[test]
+    fn a_link_naming_one_thing_is_that_thing() {
+        let list = "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI";
+        assert!(is_list(&job_for(Query::new(list), false, false)));
+
+        let video = "https://youtu.be/dQw4w9WgXcQ";
+        assert!(is_video(&job_for(Query::new(video), false, true)));
+    }
+
+    /// The list cannot be read without an account and the video can, so the
+    /// video is what plays.
+    #[test]
+    fn a_video_inside_the_users_own_list_is_the_video() {
+        let link = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=WL";
+        assert!(is_video(&job_for(Query::new(link), false, true)));
+    }
+
+    #[test]
+    fn the_users_own_list_on_its_own_says_it_needs_an_account() {
+        let job = job_for(
+            Query::new("https://www.youtube.com/playlist?list=LL"),
+            false,
+            true,
+        );
+
+        assert_eq!(job.unwrap_err(), Trouble::NeedsAccount.message());
+    }
+
+    #[test]
+    fn something_that_is_not_a_link_says_so() {
+        let job = job_for(Query::new("hello"), false, true);
+
+        assert_eq!(job.unwrap_err(), Trouble::NotALink.message());
+    }
+
+    #[test]
+    fn the_segment_preference_travels_with_the_video() {
+        match job_for(Query::new("https://youtu.be/dQw4w9WgXcQ"), true, false) {
+            Ok(Job::Video { skip_segments, .. }) => assert!(skip_segments),
+            other => panic!("expected a video, got {other:?}"),
+        }
+    }
+
+    /// An old program fails every track the same way; a gone video is only
+    /// itself.
+    #[test]
+    fn only_a_failure_of_the_program_stops_a_list() {
+        assert!(blocks_the_rest(&Trouble::Refused("403".into())));
+        assert!(blocks_the_rest(&Trouble::Tooling("timed out".into())));
+        assert!(!blocks_the_rest(&Trouble::Unavailable("private".into())));
+        assert!(!blocks_the_rest(&Trouble::Failed("odd".into())));
     }
 }

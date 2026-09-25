@@ -178,7 +178,7 @@ pub const YOUTUBE: Source = Source {
     also_contacts: Some("googlevideo.com"),
     via: Some("yt-dlp"),
     purpose: "Turns a link into audio this build can play.",
-    sends: "The link you gave it. No account, no identifier, and nothing from your library, your tags or your files.",
+    sends: "The link you gave it, and for a playlist, the address of each video in it as its turn comes. No account, no identifier, and nothing from your library, your tags or your files.",
     terms: "https://www.youtube.com/t/terms",
     // No published figure to take this from, unlike MusicBrainz. Chosen rather
     // than derived: resolving is a heavy request, and a link arrives when

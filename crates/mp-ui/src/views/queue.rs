@@ -112,12 +112,16 @@ pub struct Outcome {
 /// `cursor` is the position *within `rows`* of the track playing now, not an
 /// engine index: the panel renders a list, and what it needs to know is which
 /// line of that list to mark.
+///
+/// `upcoming` is a sentence about tracks that are coming but not queued yet,
+/// if there are any.
 pub fn show(
     ui: &mut Ui,
     theme: &Theme,
     rows: &[Row],
     cursor: Option<usize>,
     single_click: bool,
+    upcoming: Option<&str>,
 ) -> Outcome {
     let mut outcome = Outcome::default();
     let m = theme.metrics;
@@ -125,8 +129,22 @@ pub fn show(
     header(ui, theme, rows, cursor, &mut outcome);
     widgets::separator(ui, theme);
 
+    // Above the rows rather than after them: the list scrolls, and the end of
+    // it is exactly where nobody looks.
+    if let Some(upcoming) = upcoming {
+        ui.add_space(m.space(0.75));
+        ui.label(
+            egui::RichText::new(upcoming)
+                .text_style(TextStyle::Name("caption".into()))
+                .color(col(theme.palette.text_muted)),
+        );
+        ui.add_space(m.space(0.75));
+    }
+
     if rows.is_empty() {
-        empty(ui, theme);
+        if upcoming.is_none() {
+            empty(ui, theme);
+        }
         return outcome;
     }
 

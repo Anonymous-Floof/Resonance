@@ -366,6 +366,31 @@ the time it reaches the player — which is why seeking, the equalizer, the
 visualizers and everything else work on it exactly as they do on your own
 music.
 
+**Playlists, albums and mixes work too.** Paste the link and the list is read
+in one request — titles only, nothing downloaded — then the first track is
+fetched and starts. From there Resonance stays one track ahead: while a track
+plays, the next is fetched, so there is a wait before the first and normally
+none after. Nothing is fetched that you do not get to.
+
+- **A video inside a playlist** — a link copied from the address bar
+  mid-playlist names both — gets two buttons, *Play the playlist* and *Just
+  this video*, because either could be what you meant. The playlist starts from
+  that video, as it would on YouTube.
+- **The queue panel** shows the tracks fetched so far and says how many more
+  are coming.
+- **A track that has gone** — private or removed since it was added — is skipped
+  with a notice, and the rest carries on. If yt-dlp itself is the problem, or
+  three in a row fail, Resonance stops and says why once, rather than once per
+  track.
+- **Playing anything else** ends the list. Its remaining tracks are not fetched.
+- **An album** from YouTube Music lends its name to tracks that would otherwise
+  have none.
+- **Your own lists** — Liked videos, Watch Later, Liked Music — need your
+  account to read, and Resonance does not sign in to YouTube. It says so rather
+  than trying.
+- **A mix** runs to several hundred tracks, so at most the first 500 of any list
+  are read.
+
 > [!IMPORTANT]
 > **This one needs a program Resonance does not ship.** Turning a link into a
 > playable stream is a moving target, and [yt-dlp](https://github.com/yt-dlp/yt-dlp)
@@ -394,9 +419,9 @@ music.
 |---|---|
 | **Where it goes** | `youtube.com`, and `i.ytimg.com` for the cover |
 | **Also contacted** | `googlevideo.com` — the audio itself arrives from Google's media servers rather than from `youtube.com`. The activity log records which one actually answered |
-| **What is sent** | The link you gave it. **No account, no cookie, no identifier**, and nothing from your library, your tags or your files |
+| **What is sent** | The link you gave it, and for a playlist, the address of each video in it as its turn comes. **No account, no cookie, no identifier**, and nothing from your library, your tags or your files |
 | **Who sends it** | The YouTube requests are made by **yt-dlp**, not by Resonance. This is the one thing `cargo tree` cannot account for, which is exactly why it is written here and on the settings screen. They are still logged |
-| **When** | Only when you paste a link |
+| **When** | When you paste a link, and during a playlist, once per track as the one before it starts |
 | **If it fails** | Nothing plays, and the box says why |
 
 **Nothing is added to your library, and nothing is written to your music
@@ -621,7 +646,7 @@ scripted fake. **No test in the workspace opens a socket.**
 ## Tests
 
 ```bash
-cargo test --workspace          # 990 tests
+cargo test --workspace          # 1016 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```

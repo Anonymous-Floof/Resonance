@@ -23,6 +23,7 @@ use crate::artwork_job::ArtworkJob;
 use crate::fonts::{self, FontReport};
 use crate::immersive::Immersive;
 use crate::library::{Emptiness, Focus, LibraryState};
+use crate::link_queue::{AfterMiss, Handoff, LinkQueue};
 use crate::lyrics_job::LyricsJob;
 use crate::platform::{MediaCommand, MediaControls, NowPlayingInfo, PlaybackState};
 use crate::player::Player;
@@ -107,6 +108,11 @@ pub struct ResonanceApp {
 
     /// The box that plays a pasted link.
     open_url: views::open_url::OpenUrl,
+
+    /// A playlist from a link, being played a track at a time. Kept one track
+    /// ahead of the player by [`Self::tend_link_queue`], and dropped the
+    /// moment the user plays anything else.
+    link_queue: Option<LinkQueue>,
 
     /// Whether the first-run welcome is still showing.
     ///
@@ -262,6 +268,7 @@ impl ResonanceApp {
             yt_dlp: None,
             yt_dlp_looked_for: None,
             open_url: views::open_url::OpenUrl::default(),
+            link_queue: None,
             welcome: first_run,
             focus_search: false,
             media,
@@ -1222,17 +1229,30 @@ impl ResonanceApp {
                         album_id: track.album_id,
                         duration: track.duration,
                     },
-                    None => views::queue::Row {
-                        index: entry.index,
-                        title: entry
-                            .path
-                            .file_stem()
-                            .map_or_else(String::new, |s| s.to_string_lossy().into()),
-                        artist: String::new(),
-                        album: None,
-                        artist_id: None,
-                        album_id: None,
-                        duration: None,
+                    // A fetched track is never in the library, and its file is
+                    // named after a video id. The player knows what it is.
+                    None => match self.player.stream_facts(&entry.path) {
+                        Some(facts) => views::queue::Row {
+                            index: entry.index,
+                            title: facts.title.clone(),
+                            artist: facts.artist.clone(),
+                            album: facts.album.clone(),
+                            artist_id: None,
+                            album_id: None,
+                            duration: facts.duration,
+                        },
+                        None => views::queue::Row {
+                            index: entry.index,
+                            title: entry
+                                .path
+                                .file_stem()
+                                .map_or_else(String::new, |s| s.to_string_lossy().into()),
+                            artist: String::new(),
+                            album: None,
+                            artist_id: None,
+                            album_id: None,
+                            duration: None,
+                        },
                     },
                 }
             })
@@ -1248,6 +1268,7 @@ impl ResonanceApp {
 
         let m = self.theme.metrics;
         let cursor = self.player.queue_cursor();
+        let upcoming = self.link_queue.as_ref().and_then(LinkQueue::upcoming_note);
 
         let outcome = egui::Panel::right("queue")
             .exact_size(m.queue_width)
@@ -1267,6 +1288,7 @@ impl ResonanceApp {
                     &self.queue_rows,
                     cursor,
                     self.config.playback.play_on_single_click,
+                    upcoming.as_deref(),
                 )
             })
             .inner;
@@ -2204,16 +2226,75 @@ impl ResonanceApp {
             return;
         };
 
-        let Some(answer) = job.poll() else {
+        let Some(reply) = job.poll() else {
             return;
         };
 
+        let answer = reply.answer;
+
+        // The next track of a list that has since been dropped - the user
+        // played something else while it was fetched. It is in the cache if it
+        // is ever wanted; playing it now would take over from whatever the
+        // user has just chosen.
+        let for_the_list =
+            reply.for_a_list && self.link_queue.as_ref().is_some_and(LinkQueue::is_fetching);
+
+        if reply.for_a_list && !for_the_list {
+            return;
+        }
+
         match answer {
+            LinkAnswer::Listed { listing, start_at } => {
+                let queue = LinkQueue::new(*listing, start_at.as_deref());
+                self.open_url.close();
+                let message = match queue.total() {
+                    1 => format!("Playing \u{201c}{}\u{201d}: 1 track.", queue.title()),
+                    n => format!(
+                        "Playing \u{201c}{}\u{201d}: {n} tracks, each fetched when its turn comes.",
+                        queue.title()
+                    ),
+                };
+                self.player.notice(message, false);
+                self.link_queue = Some(queue);
+            }
+            LinkAnswer::Ready { path, facts } if for_the_list => {
+                let idle = self.player.current_path().is_none();
+                if let Some(queue) = self.link_queue.as_mut() {
+                    match queue.landed(path.clone(), idle) {
+                        Handoff::PlayNow => self.player.play_stream(path, *facts),
+                        Handoff::Enqueue => self.player.enqueue_stream(path, *facts),
+                    }
+                }
+            }
             LinkAnswer::Ready { path, facts } => {
                 self.open_url.close();
                 self.player.play_stream(path, *facts);
             }
-            LinkAnswer::Nothing { why } => {
+            LinkAnswer::Nothing {
+                why,
+                blocks_the_rest,
+            } if for_the_list => {
+                if let Some(queue) = self.link_queue.as_mut() {
+                    let title = queue.fetching_title().unwrap_or("A track").to_owned();
+                    let list = queue.title().to_owned();
+
+                    match queue.missed(blocks_the_rest) {
+                        AfterMiss::CarryOn => self.player.notice(
+                            format!(
+                                "Skipped \u{201c}{title}\u{201d} from \u{201c}{list}\u{201d}. {why}"
+                            ),
+                            false,
+                        ),
+                        // Said once, as an error, rather than once per track:
+                        // whatever this was will happen to every one of them.
+                        AfterMiss::GiveUp => self.player.notice(
+                            format!("Stopped fetching \u{201c}{list}\u{201d}. {why}"),
+                            true,
+                        ),
+                    }
+                }
+            }
+            LinkAnswer::Nothing { why, .. } => {
                 // Left on the dialog rather than raised as a notice: the user
                 // is looking at the box they typed into, and the link is still
                 // in it to be corrected.
@@ -2226,6 +2307,54 @@ impl ResonanceApp {
         }
 
         ctx.request_repaint();
+    }
+
+    /// Keep a playlist from a link one track ahead of the player.
+    ///
+    /// Every frame, and cheap: it only compares paths until a fetch is due.
+    /// Waits while the link box is open, so the worker is free for whatever
+    /// the user is about to paste rather than busy with a track they may be
+    /// about to replace.
+    fn tend_link_queue(&mut self) {
+        let Some(queue) = self.link_queue.as_mut() else {
+            return;
+        };
+
+        // Switched off, or the worker is gone: nothing more can come.
+        let Some(job) = self.youtube_job.as_mut() else {
+            self.link_queue = None;
+            return;
+        };
+
+        let player = &self.player;
+
+        if !queue.observe(player.current_path(), |path| player.is_queued(path)) {
+            // The user played something else. That is an answer, not a fault,
+            // so nothing is said about it.
+            self.link_queue = None;
+            return;
+        }
+
+        if queue.is_finished() {
+            self.link_queue = None;
+            return;
+        }
+
+        if self.open_url.is_open() || job.is_busy() {
+            return;
+        }
+
+        let Some(next) = queue.next_fetch() else {
+            return;
+        };
+
+        let skip_segments = self.config.privacy.online_youtube_sponsorblock;
+        let album = queue.album().map(str::to_owned);
+
+        if !job.fetch_listed(&next.video_id, skip_segments, album) {
+            // Not busy, so the only way here is a worker that has stopped.
+            self.link_queue = None;
+        }
     }
 
     /// The box that plays a pasted link.
@@ -2245,7 +2374,13 @@ impl ResonanceApp {
 
         let working = self.youtube_job.as_ref().and_then(YoutubeJob::working);
 
-        let outcome = views::open_url::show(ctx, &self.theme, &mut self.open_url, working);
+        let names_both = {
+            let query = mp_net::youtube::Query::new(self.open_url.text());
+            query.video_id().is_some() && query.playlist_link().is_some()
+        };
+
+        let outcome =
+            views::open_url::show(ctx, &self.theme, &mut self.open_url, working, names_both);
 
         if outcome.play {
             let link = self.open_url.text().to_owned();
@@ -2253,27 +2388,23 @@ impl ResonanceApp {
             // a link already in flight finishes under the setting it was sent
             // with rather than one changed halfway through.
             let skip_segments = self.config.privacy.online_youtube_sponsorblock;
-            // The two ways this goes nowhere are different problems with
-            // different fixes, and naming the wrong one costs an afternoon. A
-            // busy worker is not among them: the button and the Enter key are
-            // both held down while one is running.
+            // The ways this goes nowhere are different problems with
+            // different fixes, and naming the wrong one costs an afternoon.
+            // The worker says which of its own it is; a missing worker is the
+            // program not being there at all.
             let problem = match self.youtube_job.as_mut() {
-                Some(job) => {
-                    if job.want(&link, skip_segments) {
-                        None
-                    } else {
-                        Some(
-                            "That is not a link to a video this recognises. A YouTube or YouTube Music watch link, or a youtu.be one.",
-                        )
-                    }
-                }
+                Some(job) => job.want(&link, skip_segments, !outcome.video_only).err(),
                 None => Some(
-                    "yt-dlp was not found, so links cannot be played. Settings, Online says where it looked.",
+                    "yt-dlp was not found, so links cannot be played. Settings, Online says where it looked.".to_owned(),
                 ),
             };
 
-            if let Some(problem) = problem {
-                self.open_url.set_problem(problem.to_owned());
+            match problem {
+                Some(problem) => self.open_url.set_problem(problem),
+                // Whatever list was playing, the user has just asked for
+                // something else. Its remaining tracks must not keep arriving
+                // behind the new one.
+                None => self.link_queue = None,
             }
         }
 
@@ -3433,6 +3564,7 @@ impl eframe::App for ResonanceApp {
         self.tend_lyrics(ui.ctx());
         self.tend_artwork(ui.ctx());
         self.tend_youtube(ui.ctx());
+        self.tend_link_queue();
 
         // Lyrics are read from disk, so this only does anything while the
         // full-screen view is open and the track has changed under it. The

@@ -31,6 +31,7 @@ Everything the offline constraint made impossible:
 - **Artwork fetching** — done, via MusicBrainz and the Cover Art Archive
 - **Playing a YouTube link** — done, via `yt-dlp`
 - **Skipping the parts that are not the song** — done, via SponsorBlock
+- **Playlists, albums and mixes from a link** — done, one track ahead
 - Artist and genre metadata, MusicBrainz-style
 - Whatever else you have planned
 
@@ -219,6 +220,25 @@ endpoints, take the one that makes the sentence easy.
 `ring` came with it, and cost nothing: `rustls` already pulls it in under
 `ureq`, so declaring it directly added a line to `Cargo.toml` and not a single
 crate to the tree. Worth checking for before hand-rolling anything.
+
+## Playlists, and the answer that outlives its question
+
+A playlist is a list of videos that are not files yet, and the engine's queue
+is a list of files. So the list lives in `link_queue.rs` — pure decisions, no
+threads — and stays exactly one track ahead: when a track starts, the next is
+fetched while it plays. The worker never knows it is working through a list.
+
+The part worth knowing before touching it: **a background fetch can land after
+its list is gone.** The user plays an album while the next track downloads; the
+download finishes anyway. Routed by "is there a list?" it looked like a link
+just pasted and took over playback. Answers now say whether they were asked for
+by a list, and one whose list has gone is dropped. The same shape — work
+finishing after the reason for it has lapsed — will turn up in anything else
+that fetches ahead, and the fix is always to carry the reason with the answer.
+
+The other half of it: *played something else* is detected by the list's own
+tracks leaving the player's queue, not by watching one path. Mid-fetch there is
+nothing waiting to go missing, so the track last started is what is watched.
 
 ## Working across the two
 

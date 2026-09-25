@@ -411,6 +411,15 @@ pub struct Listing {
 }
 
 impl Listing {
+    /// Whether this is an album rather than a list somebody made.
+    ///
+    /// YouTube Music gives every album a playlist, and its id says so. That is
+    /// the only place an album name can come from for an ordinary upload, which
+    /// on its own knows nothing about releases.
+    pub fn is_album(&self) -> bool {
+        self.id.starts_with("OLAK5uy_")
+    }
+
     /// Where a video sits in the list, for a link that named both.
     pub fn position_of(&self, video_id: &str) -> Option<usize> {
         self.entries

@@ -56,6 +56,8 @@ pub struct Outcome {
     pub close: bool,
     /// Try the link that is in the box.
     pub play: bool,
+    /// Of a link naming a video inside a playlist, only the video.
+    pub video_only: bool,
 }
 
 /// Draw it.
@@ -63,11 +65,17 @@ pub struct Outcome {
 /// `working` is the worker's own description of what it is doing, or `None`
 /// when it is idle. Passed in rather than read here so this file has no
 /// opinion about how the work is done.
+///
+/// `names_both` is whether the text in the box names a video *and* a playlist
+/// it was opened from, which is what a link copied from the address bar
+/// mid-playlist looks like. Neither reading is safe to assume — one person
+/// wants the song, the next the whole mix — so both are offered.
 pub fn show(
     ctx: &egui::Context,
     theme: &Theme,
     state: &mut OpenUrl,
     working: Option<&str>,
+    names_both: bool,
 ) -> Outcome {
     let mut outcome = Outcome::default();
 
@@ -102,7 +110,7 @@ pub fn show(
                 .inner_margin(egui::Margin::same(m.space(2.0) as i8)),
         )
         .show(ctx, |ui| {
-            body(ui, theme, state, working, &mut outcome);
+            body(ui, theme, state, working, names_both, &mut outcome);
         });
 
     if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
@@ -117,6 +125,7 @@ fn body(
     theme: &Theme,
     state: &mut OpenUrl,
     working: Option<&str>,
+    names_both: bool,
     outcome: &mut Outcome,
 ) {
     let m = theme.metrics;
@@ -128,7 +137,7 @@ fn body(
             .color(col(p.text_primary)),
     );
     ui.label(
-        RichText::new("A YouTube or YouTube Music link. The audio is fetched to this machine and played from there; nothing is added to your library and nothing is written to your music folders.")
+        RichText::new("A YouTube or YouTube Music link to a video, a playlist, an album or a mix. The audio is fetched to this machine and played from there; nothing is added to your library and nothing is written to your music folders. A playlist starts once its first track is here, and each one after is fetched while the one before it plays.")
             .text_style(TextStyle::Name("caption".into()))
             .color(col(p.text_muted)),
     );
@@ -180,15 +189,38 @@ fn body(
 
     ui.add_space(m.space(1.5));
 
+    if names_both && !busy {
+        ui.add_space(m.space(1.0));
+        ui.label(
+            RichText::new("This link is to a video inside a playlist.")
+                .text_style(TextStyle::Name("caption".into()))
+                .color(col(p.text_secondary)),
+        );
+    }
+
     ui.horizontal(|ui| {
         let ready = !busy && !state.text.trim().is_empty();
+        let label = if names_both {
+            "Play the playlist"
+        } else {
+            "Play"
+        };
 
         if ui
-            .add_enabled_ui(ready, |ui| widgets::accent_button(ui, theme, "Play"))
+            .add_enabled_ui(ready, |ui| widgets::accent_button(ui, theme, label))
             .inner
             .clicked()
         {
             outcome.play = true;
+        }
+
+        if names_both
+            && ui
+                .add_enabled(ready, egui::Button::new("Just this video"))
+                .clicked()
+        {
+            outcome.play = true;
+            outcome.video_only = true;
         }
 
         if ui.button("Cancel").clicked() {
