@@ -147,7 +147,6 @@ impl ToolStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Idle,
-    Resolving,
     Fetching,
     Listing,
 }
@@ -155,7 +154,6 @@ pub enum Stage {
 impl Stage {
     fn from_code(code: u8) -> Self {
         match code {
-            1 => Self::Resolving,
             2 => Self::Fetching,
             3 => Self::Listing,
             _ => Self::Idle,
@@ -165,7 +163,6 @@ impl Stage {
     fn code(self) -> u8 {
         match self {
             Self::Idle => 0,
-            Self::Resolving => 1,
             Self::Fetching => 2,
             Self::Listing => 3,
         }
@@ -175,7 +172,6 @@ impl Stage {
     pub fn label(self) -> Option<&'static str> {
         match self {
             Self::Idle => None,
-            Self::Resolving => Some("Looking up the link"),
             Self::Fetching => Some("Fetching the audio"),
             Self::Listing => Some("Reading the playlist"),
         }
@@ -544,33 +540,17 @@ fn video(
     stage: &AtomicU8,
     ctx: &egui::Context,
 ) -> Answer {
-    stage.store(Stage::Resolving.code(), Ordering::Relaxed);
-    ctx.request_repaint();
-
-    let resolved = match client.resolve(query) {
-        Ok(resolved) => resolved,
-        // The reason travels with the failure now. Saying only that
-        // nothing happened sent people hunting through the log for a line
-        // that already knew the answer.
-        Err(trouble) => {
-            return Answer::Nothing {
-                why: trouble.message(),
-                blocks_the_rest: blocks_the_rest(&trouble),
-            };
-        }
-    };
-
     stage.store(Stage::Fetching.code(), Ordering::Relaxed);
     ctx.request_repaint();
 
-    let audio = match client.fetch_audio(&resolved) {
-        Ok(audio) => audio,
+    // One run: the look-up and the download together. The reason travels
+    // with a failure, because saying only that nothing happened sent people
+    // hunting through the log for a line that already knew the answer.
+    let (resolved, audio) = match client.fetch(query) {
+        Ok(found) => found,
         Err(trouble) => {
-            // Two sentences rather than one joined clause: the reasons
-            // name YouTube and yt-dlp, and lowercasing either to fit after
-            // a comma reads worse than a full stop does.
             return Answer::Nothing {
-                why: format!("Found {:?}. {}", resolved.title, trouble.message()),
+                why: trouble.message(),
                 blocks_the_rest: blocks_the_rest(&trouble),
             };
         }
@@ -979,26 +959,19 @@ mod tests {
     #[test]
     fn work_that_has_not_started_yet_still_has_a_label() {
         assert_eq!(working_label(Stage::Idle), "Working");
-        assert_eq!(working_label(Stage::Resolving), "Looking up the link");
         assert_eq!(working_label(Stage::Fetching), "Fetching the audio");
     }
 
     #[test]
     fn every_stage_but_idle_says_what_is_happening() {
         assert_eq!(Stage::Idle.label(), None);
-        assert!(Stage::Resolving.label().is_some());
         assert!(Stage::Fetching.label().is_some());
         assert!(Stage::Listing.label().is_some());
     }
 
     #[test]
     fn a_stage_survives_the_trip_through_an_atomic() {
-        for stage in [
-            Stage::Idle,
-            Stage::Resolving,
-            Stage::Fetching,
-            Stage::Listing,
-        ] {
+        for stage in [Stage::Idle, Stage::Fetching, Stage::Listing] {
             assert_eq!(Stage::from_code(stage.code()), stage);
         }
     }

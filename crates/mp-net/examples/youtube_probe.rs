@@ -128,8 +128,18 @@ fn main() {
 
 /// Resolve one video, and fetch it if asked.
 fn probe_video(client: &Client, query: &Query, fetch: bool) {
-    match client.resolve(query) {
-        Ok(resolved) => {
+    // With `--fetch` this is exactly what the application does: one run that
+    // looks the video up and downloads it. Timing it therefore times the app.
+    let answer = if fetch {
+        client
+            .fetch(query)
+            .map(|(resolved, audio)| (resolved, Some(audio)))
+    } else {
+        client.resolve(query).map(|resolved| (resolved, None))
+    };
+
+    match answer {
+        Ok((resolved, audio)) => {
             println!("  title:     {}", resolved.title);
             println!("  artist:    {}", resolved.artist);
             println!("  album:     {}", resolved.album.as_deref().unwrap_or("-"));
@@ -145,19 +155,11 @@ fn probe_video(client: &Client, query: &Query, fetch: bool) {
                 resolved.thumbnail.as_deref().unwrap_or("-")
             );
 
-            if fetch {
+            if let Some(audio) = audio {
                 println!();
-                match client.fetch_audio(&resolved) {
-                    Ok(audio) => {
-                        println!("  fetched:   {}", audio.path.display());
-                        println!("  bytes:     {}", audio.bytes);
-                        println!("  looks like: {}", sniff(&audio.path));
-                    }
-                    Err(trouble) => {
-                        println!("  no audio:  {}", trouble.detail());
-                        println!("  means:     {}", trouble.message());
-                    }
-                }
+                println!("  fetched:   {}", audio.path.display());
+                println!("  bytes:     {}", audio.bytes);
+                println!("  looks like: {}", sniff(&audio.path));
             }
         }
         Err(trouble) => {

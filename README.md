@@ -406,9 +406,9 @@ none after. Nothing is fetched that you do not get to.
 >
 > YouTube changes what it demands of a program that downloads from it every few
 > weeks, and an out-of-date yt-dlp fails in a way that looks like a broken
-> player rather than an old tool: the link resolves, the right title and cover
-> appear, and only the audio is refused — usually with `HTTP Error 403` or
-> `Requested format is not available` in the activity log.
+> player rather than an old tool: a link that plays perfectly well in a browser
+> is refused here — usually with `HTTP Error 403` or `Requested format is not
+> available` in the activity log.
 >
 > Resonance names the likely cause rather than leaving you to guess, and
 > Settings says so plainly when the copy it found is more than about three
@@ -646,7 +646,7 @@ scripted fake. **No test in the workspace opens a socket.**
 ## Tests
 
 ```bash
-cargo test --workspace          # 1016 tests
+cargo test --workspace          # 1022 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```
@@ -732,8 +732,9 @@ them were the right one.
 cargo run -p mp-net --example youtube_probe -- "https://youtu.be/jNQXAC9IVRw"
 ```
 Resolves one link and prints what came back, which yt-dlp it used and what
-version, and the log lines it produced. Add `--fetch` to download the audio as
-well and report what container it turned out to be. Given a playlist, album or
+version, and the log lines it produced. Add `--fetch` to download the audio
+instead, by the same single run the application makes — so timing it times the
+app — and report what container it turned out to be. Given a playlist, album or
 mix link — or any link with `--list` — it reads what is in the list instead,
 and fetches none of it. **This one uses the network and runs yt-dlp.**
 

@@ -1,9 +1,9 @@
 //! Turning a link into a file this build can play.
 //!
-//! Three steps, deliberately separate so the caller can say which one it is
-//! waiting on: [`Client::resolve`] asks what a link *is*,
-//! [`Client::fetch_audio`] gets the sound, and [`Client::fetch_thumbnail`]
-//! gets the picture. Only the third is an ordinary request; the first two are
+//! Three steps, and the first two are usually taken together.
+//! [`Client::resolve`] asks what a link *is*, [`Client::fetch`] asks and gets
+//! the sound in the same breath, and [`Client::fetch_thumbnail`] gets the
+//! picture. Only the third is an ordinary request; the first two are
 //! run by `yt-dlp`, for the reasons set out in [`crate::tool`].
 //!
 //! A playlist adds a fourth, [`Client::list`], which asks what is *in* one
@@ -910,26 +910,50 @@ impl Client {
         Ok(listing)
     }
 
-    /// Get the audio itself, into the cache directory.
+    /// Look a video up and fetch its audio, in one run of the program.
+    ///
+    /// One run rather than [`Self::resolve`] followed by a download, because
+    /// every run looks the video up from scratch, and the look-up is most of
+    /// the cost: measured at eight to ten seconds, against about five for the
+    /// transfer of a song. Two runs paid it twice and took nearly half a
+    /// minute before the first note.
+    ///
+    /// Answers from the cache when both halves are already here, and runs
+    /// nothing at all. A known answer whose file has since been swept is
+    /// simply fetched again.
     ///
     /// **Blocks, for as long as the download takes.** Background threads only.
-    pub fn fetch_audio(&self, resolved: &Resolved) -> Result<Audio, Trouble> {
-        // The id has been validated to eleven characters of `A-Z a-z 0-9 _ -`,
-        // which is what makes it safe to build a path from.
-        if !is_video_id(&resolved.video_id) {
+    pub fn fetch(&self, query: &Query) -> Result<(Resolved, Audio), Trouble> {
+        // Validated to eleven characters of `A-Z a-z 0-9 _ -`, which is what
+        // makes it safe to build a path from.
+        let Some(video_id) = query.video_id() else {
             return Err(Trouble::NotALink);
-        }
+        };
 
-        if let Some(existing) = self.existing_audio(&resolved.video_id) {
-            self.log(
-                &YOUTUBE,
-                Outcome::Cached,
-                resolved.subject(),
-                existing.bytes,
-                None,
-                None,
-            );
-            return Ok(existing);
+        let key = query.cache_key();
+
+        if let Some(entry) = self.cache.read::<Resolved>(&key) {
+            match entry.found {
+                None => {
+                    self.log(&YOUTUBE, Outcome::Cached, query.subject(), 0, None, None);
+                    return Err(Trouble::Unavailable(
+                        "remembered from an earlier lookup".to_owned(),
+                    ));
+                }
+                Some(resolved) => {
+                    if let Some(audio) = self.existing_audio(&video_id) {
+                        self.log(
+                            &YOUTUBE,
+                            Outcome::Cached,
+                            resolved.subject(),
+                            audio.bytes,
+                            None,
+                            None,
+                        );
+                        return Ok((resolved, audio));
+                    }
+                }
+            }
         }
 
         if let Err(err) = std::fs::create_dir_all(&self.audio_dir) {
@@ -939,12 +963,14 @@ impl Client {
             )));
         }
 
-        let template = self
-            .audio_dir
-            .join(format!("{}.%(ext)s", resolved.video_id));
+        let template = self.audio_dir.join(format!("{video_id}.%(ext)s"));
         let template = template.to_string_lossy().into_owned();
         let ceiling = MAX_AUDIO_BYTES.to_string();
 
+        // `--no-simulate` is what makes this one run: without it, asking for
+        // the description means not downloading, and with it the program
+        // downloads and then describes what it got.
+        //
         // Deliberately absent: any cookie or account flag, so nothing about
         // the user's own YouTube account is ever involved in this; the
         // SponsorBlock post-processors, which re-encode the file and would
@@ -958,6 +984,8 @@ impl Client {
         // the file decodes the same either way, so its absence costs nothing
         // and is never checked for.
         let args = vec![
+            "--dump-single-json",
+            "--no-simulate",
             "--no-playlist",
             "--no-warnings",
             "--no-progress",
@@ -967,7 +995,7 @@ impl Client {
             ceiling.as_str(),
             "-o",
             template.as_str(),
-            resolved.video_id.as_str(),
+            query.link(),
         ];
 
         self.youtube_limiter.acquire();
@@ -979,7 +1007,7 @@ impl Client {
                 self.log(
                     &YOUTUBE,
                     err.outcome(),
-                    resolved.subject(),
+                    query.subject(),
                     0,
                     Some(err.to_string()),
                     None,
@@ -992,10 +1020,17 @@ impl Client {
             let trouble = interpret(&output);
             let err = trouble.as_error();
             self.note(&err, &self.youtube_limiter);
+
+            // As in `resolve`: only a video that is genuinely gone is
+            // remembered, never a refusal.
+            if matches!(trouble, Trouble::Unavailable(_)) {
+                self.store(&key, CacheEntry::<Resolved>::missing());
+            }
+
             self.log(
                 &YOUTUBE,
                 err.outcome(),
-                resolved.subject(),
+                query.subject(),
                 0,
                 Some(trouble.detail()),
                 None,
@@ -1005,20 +1040,43 @@ impl Client {
 
         self.youtube_limiter.note_success();
 
-        let Some(audio) = self.existing_audio(&resolved.video_id) else {
-            // The program said it worked and there is nothing there. Worth a
-            // log line of its own rather than a silent nothing.
+        let dumped: Dumped = match serde_json::from_slice(&output.stdout) {
+            Ok(dumped) => dumped,
+            Err(err) => {
+                let err = NetError::Decode(err.to_string());
+                self.log(
+                    &YOUTUBE,
+                    err.outcome(),
+                    query.subject(),
+                    0,
+                    Some(err.to_string()),
+                    None,
+                );
+                return Err(Trouble::Failed(err.to_string()));
+            }
+        };
+
+        let served_by = dumped.media_url().and_then(host_of);
+        let resolved = dumped.into_resolved(&video_id);
+
+        // Remembered before the file is checked for: what the video is does
+        // not depend on whether this particular download landed.
+        self.store(&key, CacheEntry::found(resolved.clone()));
+
+        let Some(audio) = self.existing_audio(&video_id) else {
+            // The program said it worked and there is nothing there - which is
+            // also what a file over the size ceiling looks like, since the
+            // program skips it without calling that an error.
+            let said = "the download reported success and left no file".to_owned();
             self.log(
                 &YOUTUBE,
                 Outcome::Failed,
                 resolved.subject(),
                 0,
-                Some("the download reported success and left no file".to_owned()),
-                None,
+                Some(said.clone()),
+                served_by,
             );
-            return Err(Trouble::Failed(
-                "the download reported success and left no file".to_owned(),
-            ));
+            return Err(Trouble::Failed(said));
         };
 
         self.log(
@@ -1027,10 +1085,16 @@ impl Client {
             resolved.subject(),
             audio.bytes,
             None,
-            None,
+            served_by,
         );
 
-        Ok(audio)
+        Ok((
+            resolved,
+            Audio {
+                from_cache: false,
+                ..audio
+            },
+        ))
     }
 
     /// Get the picture that goes with a video.
@@ -1699,19 +1763,133 @@ mod tests {
         }
     }
 
+    fn rick() -> Query {
+        Query::new("dQw4w9WgXcQ")
+    }
+
+    fn put_file(harness: &Harness, bytes: &[u8]) -> PathBuf {
+        std::fs::create_dir_all(&harness.audio_dir).unwrap();
+        let path = harness.audio_dir.join("dQw4w9WgXcQ.m4a");
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    fn remember(harness: &Harness, entry: CacheEntry<Resolved>) {
+        harness.client.store(&rick().cache_key(), entry);
+    }
+
     #[test]
     fn a_file_already_here_is_used_and_nothing_runs() {
         let harness = harness(vec![], vec![]);
-        std::fs::create_dir_all(&harness.audio_dir).unwrap();
-        let path = harness.audio_dir.join("dQw4w9WgXcQ.m4a");
-        std::fs::write(&path, b"pretend this is audio").unwrap();
+        let path = put_file(&harness, b"pretend this is audio");
+        remember(&harness, CacheEntry::found(resolved()));
 
-        let audio = harness.client.fetch_audio(&resolved()).expect("the file");
+        let (found, audio) = harness.client.fetch(&rick()).expect("the file");
 
+        assert_eq!(found, resolved());
         assert_eq!(audio.path, path);
         assert!(audio.from_cache);
         assert!(harness.runner.calls().is_empty());
         assert_eq!(harness.activity.recent()[0].outcome, Outcome::Cached);
+    }
+
+    /// The whole point: one run of the program, which looks the video up and
+    /// downloads it, instead of two that each looked it up from scratch.
+    #[test]
+    fn looking_up_and_downloading_is_one_run() {
+        let harness = harness(vec![Ok(ran(DUMP))], vec![]);
+        let path = put_file(&harness, b"what the program wrote");
+
+        let (found, audio) = harness.client.fetch(&rick()).expect("fetched");
+
+        assert_eq!(harness.runner.calls().len(), 1);
+        let args = &harness.runner.calls()[0];
+        assert!(args.contains(&"--dump-single-json".to_owned()));
+        assert!(args.contains(&"--no-simulate".to_owned()));
+
+        assert_eq!(found.title, "Never Gonna Give You Up (Official Video)");
+        assert_eq!(audio.path, path);
+        assert!(!audio.from_cache);
+    }
+
+    /// One line per track, naming the machine that served it and the size of
+    /// what arrived.
+    #[test]
+    fn a_fetch_is_one_line_in_the_log() {
+        let harness = harness(vec![Ok(ran(DUMP))], vec![]);
+        put_file(&harness, b"twelve bytes");
+
+        harness.client.fetch(&rick()).expect("fetched");
+
+        let recent = harness.activity.recent();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].outcome, Outcome::Ok);
+        assert_eq!(recent[0].host, "rr3---sn-abcd.googlevideo.com");
+        assert_eq!(recent[0].bytes, 12);
+    }
+
+    #[test]
+    fn a_known_answer_whose_file_was_swept_is_fetched_again() {
+        // The fake program writes nothing, so the run ends in "left no file";
+        // what matters here is that knowing the answer did not stop the run.
+        let harness = harness(vec![Ok(ran(DUMP))], vec![]);
+        remember(&harness, CacheEntry::found(resolved()));
+
+        let _ = harness.client.fetch(&rick());
+
+        assert_eq!(harness.runner.calls().len(), 1);
+    }
+
+    #[test]
+    fn a_remembered_miss_runs_nothing() {
+        let harness = harness(vec![], vec![]);
+        remember(&harness, CacheEntry::missing());
+
+        let trouble = harness.client.fetch(&rick()).unwrap_err();
+
+        assert!(matches!(trouble, Trouble::Unavailable(_)), "{trouble:?}");
+        assert!(harness.runner.calls().is_empty());
+    }
+
+    #[test]
+    fn a_video_found_gone_while_fetching_is_remembered() {
+        let harness = harness(
+            vec![Ok(failed(
+                "ERROR: [youtube] dQw4w9WgXcQ: Video unavailable",
+            ))],
+            vec![],
+        );
+
+        assert!(harness.client.fetch(&rick()).is_err());
+        assert!(harness.client.fetch(&rick()).is_err());
+
+        assert_eq!(
+            harness.runner.calls().len(),
+            1,
+            "asked twice about a video that is gone"
+        );
+    }
+
+    #[test]
+    fn a_refusal_while_fetching_is_not_remembered() {
+        let harness = harness(
+            vec![
+                Ok(failed(
+                    "ERROR: unable to download video data: HTTP Error 403: Forbidden",
+                )),
+                Ok(ran(DUMP)),
+            ],
+            vec![],
+        );
+
+        let trouble = harness.client.fetch(&rick()).unwrap_err();
+        assert!(matches!(trouble, Trouble::Refused(_)), "{trouble:?}");
+
+        put_file(&harness, b"after the update");
+        assert!(
+            harness.client.fetch(&rick()).is_ok(),
+            "the refusal was remembered"
+        );
     }
 
     /// A partial download must never be mistaken for a finished one, or a
@@ -1746,9 +1924,9 @@ mod tests {
 
     #[test]
     fn a_download_that_leaves_nothing_behind_is_a_failure() {
-        let harness = harness(vec![Ok(ran(""))], vec![]);
+        let harness = harness(vec![Ok(ran(DUMP))], vec![]);
 
-        assert!(harness.client.fetch_audio(&resolved()).is_err());
+        assert!(harness.client.fetch(&rick()).is_err());
 
         let entry = &harness.activity.recent()[0];
         assert_eq!(entry.outcome, Outcome::Failed);
@@ -1759,7 +1937,7 @@ mod tests {
     fn the_download_is_capped_and_never_touches_an_account() {
         let harness = harness(vec![Ok(ran(""))], vec![]);
 
-        let _ = harness.client.fetch_audio(&resolved());
+        let _ = harness.client.fetch(&rick());
 
         let args = harness.runner.calls()[0].join(" ");
         assert!(args.contains("--max-filesize"), "{args}");
@@ -1776,7 +1954,7 @@ mod tests {
     fn segments_are_not_cut_out_of_the_file() {
         let harness = harness(vec![Ok(ran(""))], vec![]);
 
-        let _ = harness.client.fetch_audio(&resolved());
+        let _ = harness.client.fetch(&rick());
 
         let args = harness.runner.calls()[0].join(" ");
         assert!(!args.contains("--sponsorblock"), "{args}");
